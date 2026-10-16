@@ -1,2 +1,0 @@
-# codan
-arabic devloping platform
