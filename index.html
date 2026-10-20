@@ -2813,7 +2813,8 @@ button {
     pendingSharedPostId = new URLSearchParams(location.search).get("post") || "",
     pendingSharedGroupId = new URLSearchParams(location.search).get("group") || "",
     sharedPostHandled = false,
-    sharedPostLookupBusy = false;
+    sharedPostLookupBusy = false,
+    sharedAuthReady = false;
 
   let language = read("codna_language_v1", "ar") === "en" ? "en" : "ar";
 
@@ -4241,6 +4242,8 @@ button {
     auth.onAuthStateChanged(async (user) => {
       stopUserWatchers();
       if (!user) {
+        sharedAuthReady = false;
+        sharedPostHandled = false;
         stopCoreListeners();
         activeUser = null;
         savedIds = [];
@@ -4267,6 +4270,7 @@ button {
         }
         return;
       }
+      sharedAuthReady = false;
       const firstLogin = !activeUser;
       try {
         if (user.email && !user.emailVerified) {
@@ -4296,7 +4300,10 @@ button {
           bindPostsWindow();
         }
         renderFrame();
+        sharedAuthReady = true;
+        openSharedPostWhenReady();
       } catch (e) {
+        sharedAuthReady = false;
         handleError(e);
         activeUser = null;
         try {
@@ -4590,7 +4597,7 @@ button {
 
   async function openSharedPostWhenReady() {
     const postId = pendingSharedPostId;
-    if (!postId || !/^[A-Za-z0-9_-]{1,128}$/.test(postId) || !currentUser() || !database || sharedPostHandled || sharedPostLookupBusy) return;
+    if (!postId || !/^[A-Za-z0-9_-]{1,128}$/.test(postId) || !currentUser() || !database || !sharedAuthReady || sharedPostHandled || sharedPostLookupBusy) return;
     let post = findPost(postId);
     if (post) {
       sharedPostHandled = true;
