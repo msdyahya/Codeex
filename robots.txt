@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /*?post=
+Disallow: /*&post=
+
+Sitemap: https://codeex.dev/sitemap.xml
