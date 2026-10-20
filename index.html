@@ -2060,7 +2060,6 @@ html[data-auth-state="guest"] #visitorLanding {
 .visitor-demo-card:nth-child(3) { animation-delay: .16s; }
 .visitor-actions .btn { transition: transform .2s ease, box-shadow .2s ease; }
 .visitor-actions .btn:hover { transform: translateY(-2px); box-shadow: 0 9px 22px #2864e81f; }
-.visitor-owner { margin: 26px 0 0; color: var(--muted); font-size: 12px; }
 @keyframes visitorEnter { from { opacity: 0; transform: translateY(18px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes markFloat { 0%,100% { transform: translateY(0) rotate(0); } 50% { transform: translateY(-4px) rotate(-3deg); } }
 @media (prefers-reduced-motion: reduce) {
@@ -2625,6 +2624,39 @@ button {
 .skeleton::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(127,127,127,.16),transparent);transform:translateX(-100%);animation:skshine 1.2s infinite}
 @keyframes skshine{to{transform:translateX(100%)}}
 @media (prefers-reduced-motion:reduce){.skeleton::after{animation:none}}
+.site-footer {
+  width: min(100% - 36px, 1200px);
+  margin: 0 auto;
+  padding: 22px 8px max(24px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 12px 22px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.site-footer a {
+  padding: 5px 4px;
+  color: inherit;
+  font: inherit;
+  text-decoration: none;
+}
+.site-footer a:hover { color: var(--blue); }
+.site-footer .footer-owner { flex-basis: 100%; font-size: 12px; }
+.public-info-card { width: min(100%, 860px); margin: 22px auto; padding: clamp(20px, 4vw, 38px); }
+.public-info-card h1 { margin: 0 0 8px; font: 900 clamp(24px, 4vw, 34px) var(--head); }
+.public-info-card h2 { margin: 24px 0 8px; font: 800 18px var(--head); }
+.public-info-card p, .public-info-card li { line-height: 1.9; color: var(--muted); }
+.public-info-card ul { padding-inline-start: 24px; }
+.public-info-card .page-head { margin-bottom: 20px; }
+.visitor-landing:has(.public-info-card) { display: block !important; }
+@media (max-width: 600px) {
+  .site-footer { gap: 8px 16px; }
+  .public-info-card { margin: 14px auto; }
+}
 </style>
 </head>
 <body>
@@ -2647,6 +2679,7 @@ button {
 <nav class="bottom-nav" id="bottomNav" aria-label="التنقل للجوال"></nav>
 </div>
 <main id="visitorLanding" class="visitor-landing" aria-live="polite"><section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">English</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>مجتمع المطورين العرب</h1><p>مساحة عربية للتعلّم والتعاون ومشاركة الأفكار والمشاريع البرمجية.</p><div class="visitor-highlights"><span>شارك المعرفة</span><span>تعلّم مع المطورين</span><span>اعرض مشاريعك</span></div><div class="visitor-actions"><button class="btn primary" data-auth="register">إنشاء حساب مجاني</button><button class="btn" data-auth="login">تسجيل الدخول</button></div><p class="visitor-sdk-warning" id="sdkWarning" role="status">يتم تحميل خدمات الموقع…</p></section></main>
+<footer id="siteFooter" class="site-footer" aria-label="روابط الموقع"></footer>
 </div>
 <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true"><div class="modal"><div class="modal-head"><h2 id="modalTitle">Codeex</h2><button class="icon-btn" data-close-modal aria-label="إغلاق">×</button></div><div class="modal-body" id="modalBody"></div></div></div>
 <div class="toast" id="toast" role="status"></div>
@@ -2776,7 +2809,11 @@ button {
   let page = "home",
     feedFilter = "الأحدث",
     searchTerm = "",
-    profileTab = "projects";
+    profileTab = "projects",
+    pendingSharedPostId = new URLSearchParams(location.search).get("post") || "",
+    pendingSharedGroupId = new URLSearchParams(location.search).get("group") || "",
+    sharedPostHandled = false,
+    sharedPostLookupBusy = false;
 
   let language = read("codna_language_v1", "ar") === "en" ? "en" : "ar";
 
@@ -3463,6 +3500,7 @@ button {
         clearTimeout(loadingTimer);
         lastWindowRaw = raw;
         normalizePosts(raw);
+        openSharedPostWhenReady();
       },
       onError = (err) => {
         postsLoadError = !postsReady;
@@ -4223,6 +4261,10 @@ button {
         activeConversation = "";
         activeMessages = [];
         renderFrame();
+        if (pendingSharedPostId) {
+          authForm("login");
+          setAuthInfo("يلزم تسجيل الدخول لفتح المنشور.");
+        }
         return;
       }
       const firstLogin = !activeUser;
@@ -4300,8 +4342,42 @@ button {
   /* ==========================================================================
    Rendering
    ========================================================================== */
+  const PUBLIC_PAGES = new Set(["about", "privacy", "contact"]);
+  function renderSiteFooter() {
+    const footer = document.querySelector("#siteFooter");
+    if (!footer) return;
+    footer.innerHTML = `<a href="/">Codeex</a><a href="/about/">${language === "ar" ? "من نحن" : "About us"}</a><a href="/privacy/">${language === "ar" ? "الخصوصية" : "Privacy"}</a><a href="/contact/">${language === "ar" ? "اتصل بنا" : "Contact us"}</a><span class="footer-owner">${language === "ar" ? "صاحب الموقع" : "Site owner"}: <strong>Yahya El Messaoudi</strong></span>`;
+  }
+  function setPublicMetadata(title, description) {
+    document.title = `${title} | Codeex`;
+    const meta = document.querySelector('meta[name="description"]');
+    if (meta) meta.content = description;
+  }
+  function renderPublicPage(id) {
+    const ar = language === "ar";
+    const pages = {
+      about: {
+        title: ar ? "من نحن" : "About us",
+        description: ar ? "تعرّف على Codeex، مجتمع المطورين العرب." : "Learn about Codeex, a community for Arab developers.",
+        body: ar ? `<p><strong>Codeex</strong> مساحة مجتمعية للمطورين العرب لتبادل المعرفة، وطرح الأسئلة، وعرض المشاريع والأفكار البرمجية.</p><h2>ما الذي نقدمه؟</h2><ul><li>مجتمعاً لمشاركة الخبرات والنقاشات التقنية.</li><li>مساحة لعرض المشاريع والمقالات والموارد البرمجية.</li><li>أدوات تفاعلية تساعد المطورين على التواصل والتعلّم.</li></ul><h2>رؤيتنا</h2><p>أن نجعل المعرفة التقنية والتعاون بين المطورين العرب أكثر سهولة وانفتاحاً.</p>` : `<p><strong>Codeex</strong> is a community space for Arab developers to exchange knowledge, ask questions, and showcase software projects and ideas.</p><h2>What we offer</h2><ul><li>A place to share experience and discuss technology.</li><li>Space for projects, articles, and developer resources.</li><li>Community tools that support communication and learning.</li></ul><h2>Our vision</h2><p>To make technical knowledge and collaboration among Arab developers more accessible.</p>`,
+      },
+      privacy: {
+        title: ar ? "سياسة الخصوصية" : "Privacy policy",
+        description: ar ? "كيف يتعامل Codeex مع بيانات الحساب والمنشورات وتفضيلات الموقع." : "How Codeex handles account, post, and site preference data.",
+        body: ar ? `<p>توضح هذه الصفحة أنواع المعلومات التي قد يعالجها Codeex عند استخدام الموقع، وكيف تُستخدم ضمن وظائفه.</p><h2>المعلومات التي قد تُعالج</h2><ul><li>بيانات الحساب والملف الشخصي التي تقدمها، مثل الاسم والبريد الإلكتروني والنبذة والصورة.</li><li>المنشورات والتعليقات والتفاعلات والرسائل التي تنشئها أو ترسلها.</li><li>تفضيلات محلية في المتصفح مثل اللغة والمظهر.</li></ul><h2>كيف تُستخدم</h2><p>تُستخدم المعلومات لتسجيل الدخول وتشغيل ميزات المجتمع وعرض المحتوى الذي تختار مشاركته وحماية الخدمة من الاستخدام المسيء.</p><h2>المحتوى العام والخاص</h2><p>قد تكون المنشورات والتعليقات والتفاعلات ظاهرة لأعضاء المجتمع أو للزوار بحسب نوع المحتوى وإعدادات المجموعة. لا تنشر معلومات حساسة في مساحة عامة.</p><h2>الخدمات الخارجية</h2><p>يعتمد تسجيل الدخول وتخزين بعض بيانات الموقع على خدمات Firebase من Google؛ ويخضع استخدام تلك الخدمات أيضاً لسياسات مزوديها.</p><h2>الاحتفاظ والتحكم</h2><p>يمكنك تعديل بعض بيانات ملفك أو حذف محتوى من خلال ميزات الموقع المتاحة. لم تُحدد هنا مدة احتفاظ موحدة أو آلية طلب حذف خارج الأدوات المتاحة داخل الموقع.</p><p class="muted">آخر تحديث: 20 أكتوبر 2026</p>` : `<p>This page describes information Codeex may process when you use the site and how it supports site features.</p><h2>Information that may be processed</h2><ul><li>Account and profile details you provide, such as name, email, bio, and avatar.</li><li>Posts, comments, reactions, and messages you create or send.</li><li>Local browser preferences such as language and appearance.</li></ul><h2>How information is used</h2><p>Information supports sign-in, community features, displaying content you choose to share, and protecting the service from misuse.</p><h2>Public and private content</h2><p>Posts, comments, and reactions may be visible to community members or visitors depending on the content type and group settings. Avoid sharing sensitive information in public areas.</p><h2>Third-party services</h2><p>Sign-in and some site data rely on Google's Firebase services; use of those services is also subject to their providers' policies.</p><h2>Retention and control</h2><p>You can edit some profile information or remove content using available site features. No universal retention period or separate deletion-request channel is specified here.</p><p class="muted">Last updated: October 20, 2026</p>`,
+      },
+      contact: {
+        title: ar ? "اتصل بنا" : "Contact us",
+        description: ar ? "معلومات التواصل مع فريق Codeex." : "Contact information for the Codeex team.",
+        body: ar ? `<p>نسعد بملاحظاتك واقتراحاتك حول Codeex والمجتمع.</p><h2>التواصل</h2><p>لم يُضف إلى إعدادات الموقع حتى الآن بريد إلكتروني أو قناة دعم رسمية يمكن ربطها بهذه الصفحة. لتجنب توجيه رسالتك إلى عنوان غير صحيح، لن نعرض نموذج إرسال غير متصل.</p><p>يمكن لصاحب الموقع إضافة وسيلة التواصل الرسمية هنا عند توفرها.</p>` : `<p>We welcome feedback and suggestions about Codeex and its community.</p><h2>Contact details</h2><p>No official email address or support channel has been configured for this site yet. To avoid sending your message to an incorrect destination, this page does not show a non-functional contact form.</p><p>The site owner can add an official contact method here when available.</p>`,
+      },
+    };
+    const item = pages[id] || pages.about;
+    setPublicMetadata(item.title, item.description);
+    return `<section class="panel public-info-card"><div class="page-head"><div><h1>${item.title}</h1><p>${item.description}</p></div></div>${item.body}</section>`;
+  }
   function visitorMarkup() {
-    return `<section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">${language === "ar" ? "English" : "العربية"}</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>${language === "ar" ? "مجتمع المطورين العرب" : "A Community for Arab Developers"}</h1><p>${language === "ar" ? "مساحة عربية للتعلّم والتعاون ومشاركة الأفكار والمشاريع البرمجية." : "A welcoming space to learn, collaborate, and share ideas and software projects."}</p><div class="visitor-highlights"><span>${language === "ar" ? "شارك المعرفة" : "Share knowledge"}</span><span>${language === "ar" ? "تعلّم مع المطورين" : "Learn together"}</span><span>${language === "ar" ? "اعرض مشاريعك" : "Showcase projects"}</span></div><div class="visitor-demo"><div class="visitor-demo-card"><b>${language === "ar" ? "محرر يشبه VS Code" : "VS Code-like editor"}</b><span>${language === "ar" ? "ألوان syntax ونسخ سريع للكود" : "Syntax colors and one-click copy"}</span></div><div class="visitor-demo-card"><b>${language === "ar" ? "نشر مسؤول" : "Responsible publishing"}</b><span>${language === "ar" ? "منشور واحد كل 10 دقائق مع منع التكرار" : "One post every 10 minutes with duplicate protection"}</span></div><div class="visitor-demo-card"><b>${language === "ar" ? "مجتمعات خاصة" : "Private communities"}</b><span>${language === "ar" ? "الصلاحيات محمية على الخادم وليس في الواجهة فقط" : "Permissions are enforced on the server, not just in the UI"}</span></div></div><div class="visitor-actions"><button class="btn primary" data-auth="register">${language === "ar" ? "إنشاء حساب مجاني" : "Create a free account"}</button><button class="btn" data-auth="login">${language === "ar" ? "تسجيل الدخول" : "Sign in"}</button></div><p class="visitor-owner">${language === "ar" ? "صاحب الموقع" : "Created by"}: <strong>Yahya El Messaoudi</strong></p></section>`;
+    return `<section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">${language === "ar" ? "English" : "العربية"}</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>${language === "ar" ? "مجتمع المطورين العرب" : "A Community for Arab Developers"}</h1><p>${language === "ar" ? "مساحة عربية للتعلّم والتعاون ومشاركة الأفكار والمشاريع البرمجية." : "A welcoming space to learn, collaborate, and share ideas and software projects."}</p><div class="visitor-highlights"><span>${language === "ar" ? "شارك المعرفة" : "Share knowledge"}</span><span>${language === "ar" ? "تعلّم مع المطورين" : "Learn together"}</span><span>${language === "ar" ? "اعرض مشاريعك" : "Showcase projects"}</span></div><div class="visitor-demo"><div class="visitor-demo-card"><b>${language === "ar" ? "محرر يشبه VS Code" : "VS Code-like editor"}</b><span>${language === "ar" ? "ألوان syntax ونسخ سريع للكود" : "Syntax colors and one-click copy"}</span></div><div class="visitor-demo-card"><b>${language === "ar" ? "نشر مسؤول" : "Responsible publishing"}</b><span>${language === "ar" ? "منشور واحد كل 10 دقائق مع منع التكرار" : "One post every 10 minutes with duplicate protection"}</span></div><div class="visitor-demo-card"><b>${language === "ar" ? "مجتمعات خاصة" : "Private communities"}</b><span>${language === "ar" ? "الصلاحيات محمية على الخادم وليس في الواجهة فقط" : "Permissions are enforced on the server, not just in the UI"}</span></div></div><div class="visitor-actions"><button class="btn primary" data-auth="register">${language === "ar" ? "إنشاء حساب مجاني" : "Create a free account"}</button><button class="btn" data-auth="login">${language === "ar" ? "تسجيل الدخول" : "Sign in"}</button></div></section>`;
   }
 
   function renderVisitor() {
@@ -4324,6 +4400,7 @@ button {
       return;
     }
     document.documentElement.dataset.authState = "member";
+    renderSiteFooter();
     const memberApp = document.querySelector("#memberApp");
     if (memberApp) memberApp.style.display = "block";
     const landing = document.querySelector("#visitorLanding");
@@ -4511,6 +4588,48 @@ button {
     );
   }
 
+  async function openSharedPostWhenReady() {
+    const postId = pendingSharedPostId;
+    if (!postId || !/^[A-Za-z0-9_-]{1,128}$/.test(postId) || !currentUser() || !database || sharedPostHandled || sharedPostLookupBusy) return;
+    let post = findPost(postId);
+    if (post) {
+      sharedPostHandled = true;
+      openModal("تفاصيل المشاركة", postCard(post));
+      return;
+    }
+    if (!postsReady) return;
+    sharedPostLookupBusy = true;
+    try {
+      const groupId = pendingSharedGroupId;
+      if (groupId && !/^[A-Za-z0-9_-]{1,128}$/.test(groupId)) throw new Error("invalid group id");
+      const path = groupId ? `groupPosts/${groupId}/${postId}` : `posts/${postId}`;
+      const snapshot = await database.ref(path).once("value");
+      const record = snapshot.val();
+      if (!record?.data) throw new Error("post missing or unauthorized");
+      const reactions = record.reactions || {};
+      const comments = Object.entries(record.comments || {})
+        .map(([commentId, comment]) => ({ ...comment, id: commentId }))
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      post = {
+        ...record.data,
+        id: postId,
+        tags: Array.isArray(record.data.tags) ? record.data.tags : Object.values(record.data.tags || {}),
+        comments,
+        likedBy: Object.keys(reactions).filter((uid) => reactions[uid] === true),
+        likes: Object.values(reactions).filter((liked) => liked === true).length,
+        ...(groupId ? { privateGroupId: groupId } : {}),
+      };
+      if (groupId) privateGroupPosts[groupId] = [post, ...(privateGroupPosts[groupId] || []).filter((item) => item.id !== postId)];
+      else cloudPosts = [post, ...cloudPosts.filter((item) => item.id !== postId)];
+      sharedPostHandled = true;
+      openModal("تفاصيل المشاركة", postCard(post));
+    } catch (error) {
+      sharedPostHandled = true;
+      toast("لم يتم العثور على المنشور أو لا تملك صلاحية عرضه.", "error");
+    } finally {
+      sharedPostLookupBusy = false;
+    }
+  }
   function allPosts() {
     return Store.posts().filter(
       (p) =>
@@ -4734,6 +4853,7 @@ button {
       renderVisitor();
       return;
     }
+    if (!PUBLIC_PAGES.has(page)) setPublicMetadata("مجتمع المطورين العرب", "مجتمع عربي للمطورين لمشاركة الأفكار والمشاريع البرمجية.");
     const wantExtras = page === "profile" || page === "group-detail" || page === "saved";
     if (!wantExtras && extraWatches.size) syncExtraWatchers([]);
     if (wantExtras !== extrasApplied) {
@@ -4741,7 +4861,8 @@ button {
       normalizePosts(lastWindowRaw, true);
     }
     let html;
-    if (page === "home") html = feed();
+    if (PUBLIC_PAGES.has(page)) html = renderPublicPage(page);
+    else if (page === "home") html = feed();
     else if (page === "articles") html = renderArticles();
     else if (page === "groups") html = renderGroups();
     else if (page === "group-detail") html = renderGroupDetail();
@@ -4761,7 +4882,7 @@ button {
   }
 
   function navigate(id) {
-    if (!currentUser()) {
+    if (!currentUser() && !PUBLIC_PAGES.has(id) && id !== "home") {
       authForm("login");
       return;
     }
@@ -4831,7 +4952,7 @@ button {
         authForm(id);
         return;
       }
-      if (!currentUser()) {
+      if (!currentUser() && !PUBLIC_PAGES.has(id) && id !== "home") {
         authForm("login");
         return;
       }
@@ -5197,7 +5318,11 @@ button {
       return;
     }
     if (action === "share") {
-      const u = location.href.split("#")[0] + "#" + act.dataset.id;
+      const post = findPost(act.dataset.id);
+      const shareUrl = new URL("/", location.origin);
+      shareUrl.searchParams.set("post", act.dataset.id);
+      if (post?.privateGroupId) shareUrl.searchParams.set("group", post.privateGroupId);
+      const u = shareUrl.toString();
       if (navigator.clipboard)
         navigator.clipboard
           .writeText(u)
