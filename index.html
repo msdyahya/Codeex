@@ -6,17 +6,42 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://www.gstatic.com https://apis.google.com https://www.google.com https://www.recaptcha.net https://www.googletagmanager.com https://*.firebasedatabase.app https://*.firebaseio.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.googleapis.com https://*.google.com https://*.gstatic.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebasedatabase.app wss://*.firebasedatabase.app https://*.firebaseapp.com https://*.cloudfunctions.net https://*.run.app https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com https://stats.g.doubleclick.net https://www.recaptcha.net; frame-src https://www.google.com https://recaptcha.google.com https://www.recaptcha.net https://*.firebaseapp.com https://accounts.google.com https://apis.google.com https://*.firebasedatabase.app https://*.firebaseio.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <meta name="theme-color" content="#f4f7fb">
-<title>Codeex | مجتمع المطورين العرب</title>
-<meta name="description" content="Codeex مجتمع عربي للمطورين: شارك مشاريعك وأسئلتك وأفكارك البرمجية، تعلّم مع مطورين عرب، واكتشف مجتمعات تقنية متخصصة.">
+<title>Codeex | مجتمع المطورين العرب لمشاركة المشاريع</title>
+<meta name="description" content="Codeex للمطورين العرب المبتدئين والمحترفين: شارك المشاريع والأسئلة، تبادل الحلول، وتعلّم ضمن مجتمع برمجي عربي متخصص.">
 <meta name="keywords" content="مجتمع المطورين العرب, تعلم البرمجة, مشاريع برمجية, أسئلة برمجية, مطورون عرب, Codeex">
 <meta name="author" content="Yahya El Messaoudi">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<link rel="canonical" href="https://codeex.dev/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Codeex">
-<meta property="og:title" content="Codeex | مجتمع المطورين العرب">
-<meta property="og:description" content="شارك مشاريعك وأسئلتك البرمجية وتعلّم مع مجتمع Codeex للمطورين العرب.">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Codeex | مجتمع المطورين العرب">
-<meta name="twitter:description" content="مجتمع عربي للمطورين لمشاركة المشاريع والأفكار والتعلّم معاً.">
+<meta property="og:url" content="https://codeex.dev/">
+<meta property="og:title" content="Codeex | مجتمع المطورين العرب لمشاركة المشاريع">
+<meta property="og:description" content="Codeex للمطورين العرب المبتدئين والمحترفين: شارك المشاريع والأسئلة، تبادل الحلول، وتعلّم ضمن مجتمع برمجي عربي متخصص.">
+<meta property="og:image" content="https://codeex.dev/og-image.jpg">
+<meta property="og:image:secure_url" content="https://codeex.dev/og-image.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="رسم Codeex لمحرر برمجي ومجتمع مطورين متصل">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Codeex | مجتمع المطورين العرب لمشاركة المشاريع">
+<meta name="twitter:description" content="Codeex للمطورين العرب المبتدئين والمحترفين: شارك المشاريع والأسئلة، تبادل الحلول، وتعلّم ضمن مجتمع برمجي عربي متخصص.">
+<meta name="twitter:image" content="https://codeex.dev/og-image.jpg">
+<meta name="twitter:image:alt" content="رسم Codeex لمحرر برمجي ومجتمع مطورين متصل">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "Codeex",
+  "url": "https://codeex.dev/",
+  "description": "مجتمع عربي للمطورين لمشاركة المشاريع والأسئلة وتبادل الحلول والتعلّم.",
+  "inLanguage": "ar",
+  "publisher": {
+    "@type": "Person",
+    "name": "Yahya El Messaoudi"
+  }
+}
+</script>
 <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
 <link rel="preconnect" href="https://codna-f8612-default-rtdb.europe-west1.firebasedatabase.app" crossorigin>
 <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
@@ -2852,10 +2877,51 @@ button {
   .site-footer { gap: 8px 16px; }
   .public-info-card { margin: 14px auto; }
 }
+
+.visitor-audience {
+  max-width: 760px !important;
+  margin: 0 auto !important;
+  color: var(--ink) !important;
+  font-weight: 700;
+}
+.visitor-seo-copy {
+  max-width: 760px;
+  margin: 30px auto 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+  text-align: start;
+}
+.visitor-seo-copy h2 {
+  margin: 0 auto 12px;
+  text-align: center;
+  font: 800 clamp(19px, 3vw, 25px)/1.5 var(--head);
+}
+.visitor-seo-copy p,
+.visitor-seo-copy li {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.9;
+}
+.visitor-seo-copy p { margin: 0 auto 12px; }
+.visitor-seo-list { margin: 10px 0; padding-inline-start: 22px; }
+.visitor-seo-links {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  margin-top: 18px;
+  color: var(--blue);
+  font-weight: 700;
+}
+.visitor-seo-links a:hover { text-decoration: underline; }
+@media (max-width: 700px) {
+  .visitor-seo-copy { margin-top: 24px; }
+  .visitor-seo-copy p, .visitor-seo-copy li { font-size: 14px; }
+}
 </style>
 </head>
 <body>
-<noscript><p style="margin:0;padding:16px;text-align:center;font:600 15px sans-serif">يتطلب الموقع تفعيل JavaScript ليعمل بشكل صحيح.</p></noscript>
+<noscript><p style="margin:0;padding:16px;text-align:center;font:600 15px sans-serif">يمكنك قراءة معلومات Codeex العامة دون JavaScript؛ أما إنشاء الحساب وتسجيل الدخول واستخدام ميزات المجتمع فتتطلب تفعيل JavaScript.</p></noscript>
 <div class="shell">
 <div id="memberApp">
 <header class="topbar"><div class="top-inner">
@@ -2873,7 +2939,7 @@ button {
 </div>
 <nav class="bottom-nav" id="bottomNav" aria-label="التنقل للجوال"></nav>
 </div>
-<main id="visitorLanding" class="visitor-landing" aria-live="polite"><section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">English</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>مجتمع المطورين العرب</h1><p>مساحة عربية للتعلّم والتعاون ومشاركة الأفكار والمشاريع البرمجية.</p><div class="visitor-highlights"><span>شارك المعرفة</span><span>تعلّم مع المطورين</span><span>اعرض مشاريعك</span></div><div class="visitor-actions"><button class="btn primary" data-auth="register">إنشاء حساب مجاني</button><button class="btn" data-auth="login">تسجيل الدخول</button></div><p class="visitor-sdk-warning" id="sdkWarning" role="status">يتم تحميل خدمات الموقع…</p></section></main>
+<main id="visitorLanding" class="visitor-landing" aria-live="polite"><section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">English</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>مجتمع المطورين العرب</h1><p class="visitor-audience">Codeex للمطورين العرب المبتدئين والمحترفين الذين يريدون مشاركة مشاريعهم وأسئلتهم والتعلّم في مجتمع برمجي متخصص، بدلاً من تشتت النقاشات بين المنصات العامة.</p><div class="visitor-highlights"><span>شارك المعرفة</span><span>تعلّم مع المطورين</span><span>اعرض مشاريعك</span></div><div class="visitor-demo"><div class="visitor-demo-card"><b>محرر يشبه VS Code</b><span>ألوان syntax ونسخ سريع للكود</span></div><div class="visitor-demo-card"><b>نشر مسؤول</b><span>منشور واحد كل 10 دقائق مع منع التكرار</span></div><div class="visitor-demo-card"><b>مجتمعات خاصة</b><span>الصلاحيات محمية على الخادم وليس في الواجهة فقط</span></div></div><section class="visitor-seo-copy" aria-labelledby="visitor-seo-heading"><h2 id="visitor-seo-heading">مجتمع برمجي عربي للمشاريع والأسئلة والتعلّم</h2><p>في Codeex يستطيع المطور مشاركة مشروع أو سؤال برمجي، تبادل المعرفة مع أعضاء المجتمع، واكتشاف مجموعات تقنية مناسبة لاهتمامه. صُممت المنصة لتجمع نقاشات المطورين في مساحة عربية واحدة، مع بقاء الوصول إلى المنشورات عبر تسجيل الدخول.</p><ul class="visitor-seo-list"><li>اعرض مشاريعك وشارك الأفكار البرمجية مع مطورين عرب.</li><li>اطرح الأسئلة وتبادل الحلول والخبرات العملية.</li><li>تواصل ضمن مجتمعات تقنية، مع أدوات نشر وتنسيق للكود.</li></ul><nav class="visitor-seo-links" aria-label="معلومات Codeex"><a href="/about/">من نحن</a><a href="/privacy/">الخصوصية</a><a href="/contact/">اتصل بنا</a></nav></section><div class="visitor-actions"><button class="btn primary" data-auth="register">إنشاء حساب مجاني</button><button class="btn" data-auth="login">تسجيل الدخول</button></div><p class="visitor-sdk-warning" id="sdkWarning" role="status">لتسجيل الدخول وإنشاء حساب، فعّل JavaScript.</p></section></main>
 <footer id="siteFooter" class="site-footer" aria-label="روابط الموقع"></footer>
 </div>
 <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true"><div class="modal"><div class="modal-head"><h2 id="modalTitle">Codeex</h2><button class="icon-btn" data-close-modal aria-label="إغلاق">×</button></div><div class="modal-body" id="modalBody"></div></div></div>
@@ -4579,9 +4645,9 @@ button {
     return `<section class="panel public-info-card"><div class="page-head"><div><h1>${item.title}</h1><p>${item.description}</p></div></div>${item.body}</section>`;
   }
   function visitorMarkup() {
-    return `<section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">${language === "ar" ? "English" : "العربية"}</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>${language === "ar" ? "مجتمع المطورين العرب" : "A Community for Arab Developers"}</h1><p>${language === "ar" ? "مساحة عربية للتعلّم والتعاون ومشاركة الأفكار والمشاريع البرمجية." : "A welcoming space to learn, collaborate, and share ideas and software projects."}</p><div class="visitor-highlights"><span>${language === "ar" ? "شارك المعرفة" : "Share knowledge"}</span><span>${language === "ar" ? "تعلّم مع المطورين" : "Learn together"}</span><span>${language === "ar" ? "اعرض مشاريعك" : "Showcase projects"}</span></div><div class="visitor-demo"><div class="visitor-demo-card"><b>${language === "ar" ? "محرر يشبه VS Code" : "VS Code-like editor"}</b><span>${language === "ar" ? "ألوان syntax ونسخ سريع للكود" : "Syntax colors and one-click copy"}</span></div><div class="visitor-demo-card"><b>${language === "ar" ? "نشر مسؤول" : "Responsible publishing"}</b><span>${language === "ar" ? "منشور واحد كل 10 دقائق مع منع التكرار" : "One post every 10 minutes with duplicate protection"}</span></div><div class="visitor-demo-card"><b>${language === "ar" ? "مجتمعات خاصة" : "Private communities"}</b><span>${language === "ar" ? "الصلاحيات محمية على الخادم وليس في الواجهة فقط" : "Permissions are enforced on the server, not just in the UI"}</span></div></div><div class="visitor-actions"><button class="btn primary" data-auth="register">${language === "ar" ? "إنشاء حساب مجاني" : "Create a free account"}</button><button class="btn" data-auth="login">${language === "ar" ? "تسجيل الدخول" : "Sign in"}</button></div></section>`;
+    const ar = language === "ar";
+    return `<section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">${ar ? "English" : "العربية"}</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>${ar ? "مجتمع المطورين العرب" : "A Community for Arab Developers"}</h1><p class="visitor-audience">${ar ? "Codeex للمطورين العرب المبتدئين والمحترفين الذين يريدون مشاركة مشاريعهم وأسئلتهم والتعلّم في مجتمع برمجي متخصص، بدلاً من تشتت النقاشات بين المنصات العامة." : "Codeex is for beginner and experienced Arab developers who want to share projects and questions and learn in a focused Arabic coding community instead of scattered general-platform discussions."}</p><div class="visitor-highlights"><span>${ar ? "شارك المعرفة" : "Share knowledge"}</span><span>${ar ? "تعلّم مع المطورين" : "Learn together"}</span><span>${ar ? "اعرض مشاريعك" : "Showcase projects"}</span></div><div class="visitor-demo"><div class="visitor-demo-card"><b>${ar ? "محرر يشبه VS Code" : "VS Code-like editor"}</b><span>${ar ? "ألوان syntax ونسخ سريع للكود" : "Syntax colors and one-click copy"}</span></div><div class="visitor-demo-card"><b>${ar ? "نشر مسؤول" : "Responsible publishing"}</b><span>${ar ? "منشور واحد كل 10 دقائق مع منع التكرار" : "One post every 10 minutes with duplicate protection"}</span></div><div class="visitor-demo-card"><b>${ar ? "مجتمعات خاصة" : "Private communities"}</b><span>${ar ? "الصلاحيات محمية على الخادم وليس في الواجهة فقط" : "Permissions are enforced on the server, not just in the UI"}</span></div></div><section class="visitor-seo-copy" aria-labelledby="visitor-seo-heading"><h2 id="visitor-seo-heading">${ar ? "مجتمع برمجي عربي للمشاريع والأسئلة والتعلّم" : "An Arabic coding community for projects, questions, and learning"}</h2><p>${ar ? "في Codeex يستطيع المطور مشاركة مشروع أو سؤال برمجي، تبادل المعرفة مع أعضاء المجتمع، واكتشاف مجموعات تقنية مناسبة لاهتمامه. صُممت المنصة لتجمع نقاشات المطورين في مساحة عربية واحدة، مع بقاء الوصول إلى المنشورات عبر تسجيل الدخول." : "On Codeex, developers can share a project or coding question, exchange knowledge with community members, and find technical groups that match their interests. The platform brings developer discussions into one Arabic-language space, while post access remains behind sign-in."}</p><ul class="visitor-seo-list"><li>${ar ? "اعرض مشاريعك وشارك الأفكار البرمجية مع مطورين عرب." : "Showcase projects and exchange software ideas with Arab developers."}</li><li>${ar ? "اطرح الأسئلة وتبادل الحلول والخبرات العملية." : "Ask questions and share practical solutions and experience."}</li><li>${ar ? "تواصل ضمن مجتمعات تقنية، مع أدوات نشر وتنسيق للكود." : "Join technical communities with tools for publishing and code formatting."}</li></ul><nav class="visitor-seo-links" aria-label="${ar ? "معلومات Codeex" : "Codeex information"}"><a href="/about/">${ar ? "من نحن" : "About us"}</a><a href="/privacy/">${ar ? "الخصوصية" : "Privacy"}</a><a href="/contact/">${ar ? "اتصل بنا" : "Contact us"}</a></nav></section><div class="visitor-actions"><button class="btn primary" data-auth="register">${ar ? "إنشاء حساب مجاني" : "Create a free account"}</button><button class="btn" data-auth="login">${ar ? "تسجيل الدخول" : "Sign in"}</button></div><p class="visitor-sdk-warning" id="sdkWarning" role="status">${ar ? "لتسجيل الدخول وإنشاء حساب، فعّل JavaScript." : "Enable JavaScript to sign in or create an account."}</p></section>`;
   }
-
   function renderVisitor() {
     document.documentElement.dataset.authState = "guest";
     const landing = document.querySelector("#visitorLanding");
