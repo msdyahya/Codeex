@@ -2218,7 +2218,7 @@ html[data-auth-state="guest"] #visitorLanding {
 .visitor-demo-card:nth-child(3) { animation-delay: .16s; }
 .visitor-actions .btn { transition: transform .2s ease, box-shadow .2s ease; }
 .visitor-actions .btn:hover { transform: translateY(-0.125rem); box-shadow: 0 0.5625rem 1.375rem #2864e81f; }
-@keyframes visitorEnter { from { opacity: 0; transform: translateY(1.125rem) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes visitorEnter { from { opacity: .72; transform: translateY(0.625rem) scale(.995); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes markFloat { 0%,100% { transform: translateY(0) rotate(0); } 50% { transform: translateY(-0.25rem) rotate(-3deg); } }
 @media (prefers-reduced-motion: reduce) {
   .visitor-card, .visitor-brand .brand-mark, .visitor-demo-card { animation: none !important; }
