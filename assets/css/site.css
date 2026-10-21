@@ -3165,3 +3165,19 @@ body.modal-open {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Center the authentication actions as a deliberate group instead of full-width bars. */
+.auth-modal .auth-social {
+  width: min(100%, 380px);
+  margin-inline: auto;
+}
+.auth-modal #authForm > .btn {
+  width: min(100%, 320px);
+  justify-self: center;
+}
+.visitor-actions {
+  width: 100%;
+  justify-content: center;
+  align-items: center;
+  margin-inline: auto;
+}
