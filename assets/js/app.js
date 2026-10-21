@@ -1,3 +1,21 @@
+/* Codeex viewport helper: exposes the device class on <html> so CSS/JS can react
+   without hard-coded pixel checks. Purely additive; the app below is unchanged. */
+(function viewportClass() {
+  var root = document.documentElement, tick = 0;
+  function apply() {
+    var w = window.innerWidth || root.clientWidth;
+    var cls = w <= 700 ? "phone" : w <= 1100 ? "tablet" : w < 1920 ? "desktop" : "wide";
+    if (root.getAttribute("data-viewport") !== cls) root.setAttribute("data-viewport", cls);
+    root.setAttribute("data-touch", window.matchMedia && matchMedia("(pointer: coarse)").matches ? "1" : "0");
+  }
+  apply();
+  window.addEventListener("resize", function () {
+    cancelAnimationFrame(tick);
+    tick = requestAnimationFrame(apply);
+  }, { passive: true });
+  window.addEventListener("orientationchange", apply, { passive: true });
+})();
+
 (function boot(run) {
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
   else run();
