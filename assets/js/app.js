@@ -1565,6 +1565,7 @@
     auth.onAuthStateChanged(async (user) => {
       stopUserWatchers();
       if (!user) {
+        try { localStorage.removeItem("codeex_session_hint_v1"); } catch {}
         sharedAuthReady = false;
         sharedPostHandled = false;
         stopCoreListeners();
@@ -1601,6 +1602,7 @@
           await auth.signOut();
           return;
         }
+        try { localStorage.setItem("codeex_session_hint_v1", "1"); } catch {}
         /* Show the app shell and start downloading the feed right away; the profile
            check below runs in parallel instead of blocking the posts. */
         if (!activeUser) {
@@ -3610,21 +3612,66 @@
 
   renderFrame();
 
-  connectServices();
-
-  if (!firebaseAuthStarted) {
-    let tries = 0;
-    const sdkRetry = setInterval(() => {
-      if (connectServices()) {
-        clearInterval(sdkRetry);
-        return;
-      }
-      if (++tries >= 100) {
-        clearInterval(sdkRetry);
-        const w = document.querySelector("#sdkWarning");
-        if (w) w.textContent = "تعذّر تحميل الموقع. تحقق من اتصالك بالإنترنت ثم أعد تحميل الصفحة.";
-      }
-    }, 100);
+  /* ==========================================================================
+   Lazy Firebase loading
+   --------------------------------------------------------------------------
+   The Firebase SDKs and App Check (reCAPTCHA) are the heaviest part of the page and a
+   first-time visitor sees a static landing screen that does not need them. They now load
+   immediately only when they are needed right away (returning member, email/deep links,
+   pending sign-in redirect) and otherwise on the first user interaction.
+   ========================================================================== */
+  const SDK_VERSION = "11.10.0";
+  const SDK_FILES = ["app", "app-check", "auth", "database"]; /* functions SDK was never used */
+  const SESSION_HINT = "codeex_session_hint_v1";
+  let sdkRequested = false,
+    sdkAttempts = 0;
+  function startFirebaseSdk() {
+    if (sdkRequested) return;
+    sdkRequested = true;
+    const ready = () => {
+      if (connectServices()) return;
+      let tries = 0;
+      const poll = setInterval(() => {
+        if (connectServices() || ++tries >= 100) clearInterval(poll);
+      }, 100);
+    };
+    if (typeof firebase !== "undefined" && firebase.apps) {
+      ready();
+      return;
+    }
+    let remaining = SDK_FILES.length,
+      failed = false;
+    SDK_FILES.forEach((name) => {
+      const el = document.createElement("script");
+      el.src = `https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-${name}-compat.js`;
+      el.async = false; /* dynamically inserted scripts keep their order only with async=false */
+      el.onload = () => {
+        if (--remaining === 0 && !failed) ready();
+      };
+      el.onerror = () => {
+        if (failed) return;
+        failed = true;
+        sdkRequested = false;
+        if (++sdkAttempts < 3) setTimeout(startFirebaseSdk, 2500);
+      };
+      document.head.appendChild(el);
+    });
+  }
+  const needsFirebaseNow = (() => {
+    try {
+      if (localStorage.getItem(SESSION_HINT) === "1") return true;
+    } catch {}
+    try {
+      if (Object.keys(sessionStorage).some((k) => k.indexOf("firebase:") === 0)) return true;
+    } catch {}
+    return /[?&](mode|oobCode)=/.test(location.search) || (location.hash.length > 1 && location.hash !== "#home");
+  })();
+  if (needsFirebaseNow || (typeof firebase !== "undefined" && firebase.apps)) startFirebaseSdk();
+  else {
+    ["pointerdown", "keydown", "touchstart", "wheel", "scroll"].forEach((ev) =>
+      window.addEventListener(ev, startFirebaseSdk, { once: true, passive: true, capture: true }),
+    );
+    setTimeout(startFirebaseSdk, 12000);
   }
 
   /* Analytics loads after the page is interactive so it never delays startup. */
