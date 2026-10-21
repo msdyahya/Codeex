@@ -3074,3 +3074,26 @@ body.modal-open {
 .modal-head .icon-btn {
   flex: 0 0 38px;
 }
+
+/* Keep dialog proportions stable under desktop zoom. A coarse pointer gets the roomier
+   touch layout; a fine-pointer desktop keeps a viewport-relative dialog at every zoom. */
+.modal {
+  width: min(34vw, 500px, calc(100vw - 32px));
+}
+.modal.auth-modal {
+  width: min(34vw, 430px, calc(100vw - 32px));
+}
+.modal.comments-modal {
+  width: min(52vw, 650px, calc(100vw - 32px));
+}
+@media (pointer: coarse) {
+  .modal {
+    width: min(92vw, 500px, calc(100vw - 16px));
+  }
+  .modal.auth-modal {
+    width: min(92vw, 430px, calc(100vw - 16px));
+  }
+  .modal.comments-modal {
+    width: min(94vw, 650px, calc(100vw - 16px));
+  }
+}
