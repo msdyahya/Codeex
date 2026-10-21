@@ -1715,7 +1715,13 @@
     const landing = document.querySelector("#visitorLanding");
     if (landing) {
       landing.style.display = "grid";
-      landing.innerHTML = visitorMarkup();
+      const markup = visitorMarkup();
+      /* Rebuilding identical markup (it ran every 100ms while Firebase loaded) recreated the card
+         and restarted its entrance animation, so the page never finished painting. */
+      if (!landing.firstElementChild || landing.__codeexMarkup !== markup) {
+        landing.innerHTML = markup;
+        landing.__codeexMarkup = markup;
+      }
     }
   }
 
