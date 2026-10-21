@@ -3075,25 +3075,93 @@ body.modal-open {
   flex: 0 0 38px;
 }
 
-/* Keep dialog proportions stable under desktop zoom. A coarse pointer gets the roomier
-   touch layout; a fine-pointer desktop keeps a viewport-relative dialog at every zoom. */
+/* Auth dialog: fixed readable maximum width; shrink only when the viewport itself is narrow. */
 .modal {
-  width: min(34vw, 500px, calc(100vw - 32px));
+  width: min(500px, calc(100vw - 32px));
 }
 .modal.auth-modal {
-  width: min(34vw, 430px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(720px, calc(100dvh - 32px));
+  overflow: hidden;
 }
 .modal.comments-modal {
-  width: min(52vw, 650px, calc(100vw - 32px));
+  width: min(650px, calc(100vw - 32px));
+}
+.auth-modal .modal-head {
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 20px 24px 12px;
+}
+.auth-modal .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 24px 24px;
+  scrollbar-gutter: stable;
+}
+.auth-modal .modal-body > .form-grid {
+  display: grid;
+  gap: 12px;
+}
+.auth-modal .auth-social {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 10px;
+}
+.auth-modal .auth-social .btn {
+  min-width: 0;
+  min-height: 54px;
+  padding: 9px 10px;
+  white-space: normal;
+  line-height: 1.4;
+}
+.auth-modal .divider {
+  margin: 12px 0;
+}
+.auth-modal #authForm {
+  display: grid;
+  gap: 10px;
+}
+.auth-modal #authForm label {
+  display: grid;
+  gap: 6px;
+  line-height: 1.5;
+}
+.auth-modal #authForm .field {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  margin: 0;
+}
+.auth-modal #authForm .btn {
+  min-height: 46px;
 }
 @media (pointer: coarse) {
   .modal {
     width: min(92vw, 500px, calc(100vw - 16px));
   }
   .modal.auth-modal {
-    width: min(92vw, 430px, calc(100vw - 16px));
+    width: min(92vw, 440px, calc(100vw - 16px));
   }
   .modal.comments-modal {
     width: min(94vw, 650px, calc(100vw - 16px));
+  }
+  .auth-modal .auth-social {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .auth-modal .modal-head {
+    padding: 18px 18px 10px;
+  }
+  .auth-modal .modal-body {
+    padding: 8px 18px 18px;
+  }
+  .auth-modal .auth-social {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
