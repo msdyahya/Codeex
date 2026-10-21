@@ -124,7 +124,7 @@
     sharedPostLookupBusy = false,
     sharedAuthReady = false;
 
-  let language = read("codna_language_v1", "ar") === "en" ? "en" : "ar";
+  let language = "ar"; // Arabic only
 
   let coreRefs = [],
     coreStarted = false,
@@ -612,14 +612,13 @@
     return out;
   }
 
-  function setLanguage(lang, persist = true) {
-    language = lang === "en" ? "en" : "ar";
-    document.documentElement.lang = language;
-    document.documentElement.dir = language === "en" ? "ltr" : "rtl";
-    document.documentElement.dataset.lang = language;
-    if (persist) write("codna_language_v1", language);
-    if (currentUser()) renderFrame();
-    else renderFrame();
+  function setLanguage() {
+    language = "ar";
+    document.documentElement.lang = "ar";
+    document.documentElement.dir = "rtl";
+    document.documentElement.dataset.lang = "ar";
+    try { localStorage.removeItem("codna_language_v1"); } catch (_) {}
+    renderFrame();
   }
 
   function setTheme(mode, persist = true) {
@@ -1693,7 +1692,7 @@
   }
   function visitorMarkup() {
     const ar = language === "ar";
-    return `<section class="visitor-card"><button class="visitor-locale" data-action="toggle-language">${ar ? "English" : "العربية"}</button><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>${ar ? "مجتمع المطورين العرب" : "A Community for Arab Developers"}</h1><p class="visitor-audience">${ar ? "Codeex للمطورين العرب المبتدئين والمحترفين الذين يريدون مشاركة مشاريعهم وأسئلتهم والتعلّم في مجتمع برمجي متخصص، بدلاً من تشتت النقاشات بين المنصات العامة." : "Codeex is for beginner and experienced Arab developers who want to share projects and questions and learn in a focused Arabic coding community instead of scattered general-platform discussions."}</p><div class="visitor-highlights"><span>${ar ? "شارك المعرفة" : "Share knowledge"}</span><span>${ar ? "تعلّم مع المطورين" : "Learn together"}</span><span>${ar ? "اعرض مشاريعك" : "Showcase projects"}</span></div><div class="visitor-demo"><div class="visitor-demo-card"><b>${ar ? "محرر يشبه VS Code" : "VS Code-like editor"}</b><span>${ar ? "ألوان syntax ونسخ سريع للكود" : "Syntax colors and one-click copy"}</span></div><div class="visitor-demo-card"><b>${ar ? "نشر مسؤول" : "Responsible publishing"}</b><span>${ar ? "منشور واحد كل 10 دقائق مع منع التكرار" : "One post every 10 minutes with duplicate protection"}</span></div><div class="visitor-demo-card"><b>${ar ? "مجتمعات خاصة" : "Private communities"}</b><span>${ar ? "الصلاحيات محمية على الخادم وليس في الواجهة فقط" : "Permissions are enforced on the server, not just in the UI"}</span></div></div><section class="visitor-seo-copy" aria-labelledby="visitor-seo-heading"><h2 id="visitor-seo-heading">${ar ? "مجتمع برمجي عربي للمشاريع والأسئلة والتعلّم" : "An Arabic coding community for projects, questions, and learning"}</h2><p>${ar ? "في Codeex يستطيع المطور مشاركة مشروع أو سؤال برمجي، تبادل المعرفة مع أعضاء المجتمع، واكتشاف مجموعات تقنية مناسبة لاهتمامه. صُممت المنصة لتجمع نقاشات المطورين في مساحة عربية واحدة، مع بقاء الوصول إلى المنشورات عبر تسجيل الدخول." : "On Codeex, developers can share a project or coding question, exchange knowledge with community members, and find technical groups that match their interests. The platform brings developer discussions into one Arabic-language space, while post access remains behind sign-in."}</p><ul class="visitor-seo-list"><li>${ar ? "اعرض مشاريعك وشارك الأفكار البرمجية مع مطورين عرب." : "Showcase projects and exchange software ideas with Arab developers."}</li><li>${ar ? "اطرح الأسئلة وتبادل الحلول والخبرات العملية." : "Ask questions and share practical solutions and experience."}</li><li>${ar ? "تواصل ضمن مجتمعات تقنية، مع أدوات نشر وتنسيق للكود." : "Join technical communities with tools for publishing and code formatting."}</li></ul></section><div class="visitor-actions"><button class="btn primary" data-auth="register">${ar ? "إنشاء حساب مجاني" : "Create a free account"}</button><button class="btn" data-auth="login">${ar ? "تسجيل الدخول" : "Sign in"}</button></div></section>`;
+    return `<section class="visitor-card"><div class="visitor-brand"><span class="brand-mark">&lt;/&gt;</span><span>Codeex</span></div><h1>${ar ? "مجتمع المطورين العرب" : "A Community for Arab Developers"}</h1><p class="visitor-audience">${ar ? "Codeex للمطورين العرب المبتدئين والمحترفين الذين يريدون مشاركة مشاريعهم وأسئلتهم والتعلّم في مجتمع برمجي متخصص، بدلاً من تشتت النقاشات بين المنصات العامة." : "Codeex is for beginner and experienced Arab developers who want to share projects and questions and learn in a focused Arabic coding community instead of scattered general-platform discussions."}</p><div class="visitor-highlights"><span>${ar ? "شارك المعرفة" : "Share knowledge"}</span><span>${ar ? "تعلّم مع المطورين" : "Learn together"}</span><span>${ar ? "اعرض مشاريعك" : "Showcase projects"}</span></div><div class="visitor-demo"><div class="visitor-demo-card"><b>${ar ? "محرر يشبه VS Code" : "VS Code-like editor"}</b><span>${ar ? "ألوان syntax ونسخ سريع للكود" : "Syntax colors and one-click copy"}</span></div><div class="visitor-demo-card"><b>${ar ? "نشر مسؤول" : "Responsible publishing"}</b><span>${ar ? "منشور واحد كل 10 دقائق مع منع التكرار" : "One post every 10 minutes with duplicate protection"}</span></div><div class="visitor-demo-card"><b>${ar ? "مجتمعات خاصة" : "Private communities"}</b><span>${ar ? "الصلاحيات محمية على الخادم وليس في الواجهة فقط" : "Permissions are enforced on the server, not just in the UI"}</span></div></div><section class="visitor-seo-copy" aria-labelledby="visitor-seo-heading"><h2 id="visitor-seo-heading">${ar ? "مجتمع برمجي عربي للمشاريع والأسئلة والتعلّم" : "An Arabic coding community for projects, questions, and learning"}</h2><p>${ar ? "في Codeex يستطيع المطور مشاركة مشروع أو سؤال برمجي، تبادل المعرفة مع أعضاء المجتمع، واكتشاف مجموعات تقنية مناسبة لاهتمامه. صُممت المنصة لتجمع نقاشات المطورين في مساحة عربية واحدة، مع بقاء الوصول إلى المنشورات عبر تسجيل الدخول." : "On Codeex, developers can share a project or coding question, exchange knowledge with community members, and find technical groups that match their interests. The platform brings developer discussions into one Arabic-language space, while post access remains behind sign-in."}</p><ul class="visitor-seo-list"><li>${ar ? "اعرض مشاريعك وشارك الأفكار البرمجية مع مطورين عرب." : "Showcase projects and exchange software ideas with Arab developers."}</li><li>${ar ? "اطرح الأسئلة وتبادل الحلول والخبرات العملية." : "Ask questions and share practical solutions and experience."}</li><li>${ar ? "تواصل ضمن مجتمعات تقنية، مع أدوات نشر وتنسيق للكود." : "Join technical communities with tools for publishing and code formatting."}</li></ul></section><div class="visitor-actions"><button class="btn primary" data-auth="register">${ar ? "إنشاء حساب مجاني" : "Create a free account"}</button><button class="btn" data-auth="login">${ar ? "تسجيل الدخول" : "Sign in"}</button></div></section>`;
   }
   function renderVisitor() {
     document.documentElement.dataset.authState = "guest";
@@ -2115,7 +2114,7 @@
   function renderSettings() {
     const user = currentUser();
     const verified = !!auth.currentUser?.emailVerified;
-    return `${pageHeader("الإعدادات", "تحكم في الملف الشخصي واللغة والأمان.", "")}<section class="panel"><div class="panel-head"><h3>المعلومات الشخصية</h3></div><div class="profile-edit-image"><span class="avatar blue" style="width:56px;height:56px">${avatarContent(user)}</span><div><strong style="font-size:13px">صورة الملف الشخصي</strong><div class="profile-photo-help">اختر صورة PNG أو JPG أو WebP.</div></div><label class="btn small" for="settingsAvatar" style="margin-inline-start:auto">تغيير الصورة</label><input id="settingsAvatar" type="file" accept="image/png,image/jpeg,image/webp" hidden></div><form class="form-grid" id="profileForm"><label>الاسم الظاهر<input class="field" id="settingsName" value="${esc(user?.name || "")}" placeholder="اسمك" maxlength="50" required autocomplete="name"><small class="field-hint">بدون إيموجي.</small></label><label>اسم المستخدم<input class="field" id="settingsHandle" value="${esc(user?.handle || "")}" placeholder="username" maxlength="40" dir="ltr" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false"><small class="field-hint">اسم مستخدم فريد: أحرف إنجليزية صغيرة وأرقام و _ و - فقط (3–40 خانة).</small></label><label>نبذة قصيرة<textarea class="field" id="settingsBio" maxlength="300" placeholder="عرّف المجتمع بنفسك...">${esc(user?.bio || "")}</textarea></label><button class="btn primary" type="submit" style="justify-self:start">حفظ التغييرات</button></form></section><section class="panel" style="margin-top:13px"><div class="panel-head"><h3>تفضيلات اللغة</h3></div><div class="setting-row"><span><strong>اللغة</strong><small>اختر لغة واجهة الموقع.</small></span><select class="field" id="languageSelect" style="max-width:190px;margin:0"><option value="ar" ${language === "ar" ? "selected" : ""}>العربية</option><option value="en" ${language === "en" ? "selected" : ""}>English</option></select></div></section><section class="panel" style="margin-top:13px"><div class="panel-head"><h3>المظهر</h3></div><div class="setting-row"><span><strong>الوضع الحالي</strong><small>يتذكر Codeex اختيارك على هذا المتصفح.</small></span><button class="btn soft" id="themeSettingButton" data-action="toggle-theme">التبديل إلى الوضع الليلي</button></div></section><section class="panel" style="margin-top:13px"><div class="panel-head"><h3>الأمان والحساب</h3></div><div class="setting-row"><span><strong>حالة البريد الإلكتروني</strong><small>${verified ? "البريد الإلكتروني موثّق" : "البريد الإلكتروني غير موثّق"}</small></span>${!verified && user?.email ? '<button class="btn small" data-action="verify-email">إرسال رسالة توثيق</button>' : ""}</div><div class="setting-row"><span><strong>كلمة المرور</strong><small>أرسل رابطاً آمناً لإعادة تعيين كلمة المرور.</small></span><button class="btn small" data-action="reset-password">إعادة تعيين كلمة المرور</button></div><div class="setting-row"><span><strong>الجلسة الحالية</strong><small>إنهاء تسجيل الدخول على هذا الجهاز.</small></span><button class="btn small danger" data-auth="logout">تسجيل الخروج من هذا الجهاز</button></div><div class="notice-box">لا تشارك كلمة المرور أو رموز التحقق مع أي شخص، وسجّل الخروج دائماً من الأجهزة المشتركة.</div></section>`;
+    return `${pageHeader("الإعدادات", "تحكم في الملف الشخصي والأمان.", "")}<section class="panel"><div class="panel-head"><h3>المعلومات الشخصية</h3></div><div class="profile-edit-image"><span class="avatar blue" style="width:56px;height:56px">${avatarContent(user)}</span><div><strong style="font-size:13px">صورة الملف الشخصي</strong><div class="profile-photo-help">اختر صورة PNG أو JPG أو WebP.</div></div><label class="btn small" for="settingsAvatar" style="margin-inline-start:auto">تغيير الصورة</label><input id="settingsAvatar" type="file" accept="image/png,image/jpeg,image/webp" hidden></div><form class="form-grid" id="profileForm"><label>الاسم الظاهر<input class="field" id="settingsName" value="${esc(user?.name || "")}" placeholder="اسمك" maxlength="50" required autocomplete="name"><small class="field-hint">بدون إيموجي.</small></label><label>اسم المستخدم<input class="field" id="settingsHandle" value="${esc(user?.handle || "")}" placeholder="username" maxlength="40" dir="ltr" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false"><small class="field-hint">اسم مستخدم فريد: أحرف إنجليزية صغيرة وأرقام و _ و - فقط (3–40 خانة).</small></label><label>نبذة قصيرة<textarea class="field" id="settingsBio" maxlength="300" placeholder="عرّف المجتمع بنفسك...">${esc(user?.bio || "")}</textarea></label><button class="btn primary" type="submit" style="justify-self:start">حفظ التغييرات</button></form></section><section class="panel" style="margin-top:13px"><div class="panel-head"><h3>المظهر</h3></div><div class="setting-row"><span><strong>الوضع الحالي</strong><small>يتذكر Codeex اختيارك على هذا المتصفح.</small></span><button class="btn soft" id="themeSettingButton" data-action="toggle-theme">التبديل إلى الوضع الليلي</button></div></section><section class="panel" style="margin-top:13px"><div class="panel-head"><h3>الأمان والحساب</h3></div><div class="setting-row"><span><strong>حالة البريد الإلكتروني</strong><small>${verified ? "البريد الإلكتروني موثّق" : "البريد الإلكتروني غير موثّق"}</small></span>${!verified && user?.email ? '<button class="btn small" data-action="verify-email">إرسال رسالة توثيق</button>' : ""}</div><div class="setting-row"><span><strong>كلمة المرور</strong><small>أرسل رابطاً آمناً لإعادة تعيين كلمة المرور.</small></span><button class="btn small" data-action="reset-password">إعادة تعيين كلمة المرور</button></div><div class="setting-row"><span><strong>الجلسة الحالية</strong><small>إنهاء تسجيل الدخول على هذا الجهاز.</small></span><button class="btn small danger" data-auth="logout">تسجيل الخروج من هذا الجهاز</button></div><div class="notice-box">لا تشارك كلمة المرور أو رموز التحقق مع أي شخص، وسجّل الخروج دائماً من الأجهزة المشتركة.</div></section>`;
   }
 
   function clearSelectedCodeFile(clearCode = true) {
@@ -2319,10 +2318,6 @@
       const expanded = text.classList.toggle("collapsed") === false;
       act.setAttribute("aria-expanded", String(expanded));
       act.textContent = expanded ? "عرض أقل" : "عرض المزيد";
-      return;
-    }
-    if (action === "toggle-language") {
-      setLanguage(language === "ar" ? "en" : "ar");
       return;
     }
     if (action === "toggle-theme") {
@@ -2963,10 +2958,6 @@
   });
 
   document.querySelector("#pageView").addEventListener("change", async (e) => {
-    if (e.target.id === "languageSelect") {
-      setLanguage(e.target.value);
-      return;
-    }
     if (e.target.id === "publishKind") {
       updateComposePolicyUI();
       return;
