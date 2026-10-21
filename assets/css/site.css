@@ -1134,12 +1134,6 @@ svg {
   overscroll-behavior: none;
   touch-action: none;
 }
-body.modal-open {
-  position: fixed;
-  left: 0;
-  right: 0;
-  width: 100%;
-}
 .modal {
   width: min(500px, 100%);
   max-height: 90vh;
@@ -2854,7 +2848,7 @@ button {
 }
 html,
 body {
-  min-width: 320px;
+  min-width: 0;
   min-height: 100%;
 }
 body {
@@ -2994,4 +2988,89 @@ body {
 
 html[data-theme="dark"] .modal.auth-modal {
   background: linear-gradient(135deg, #151f2e 22%, #1b2940 100%);
+}
+
+/* Zoom-safe dialogs: center while they fit; scroll the overlay and dialog when they do not. */
+.modal-backdrop {
+  box-sizing: border-box;
+  align-items: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.modal-backdrop.open {
+  display: flex;
+}
+.modal {
+  box-sizing: border-box;
+  width: min(500px, 100%);
+  max-width: 100%;
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+  margin-block: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+.modal.comments-modal {
+  width: min(650px, 100%);
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+}
+.modal-head,
+.modal-body,
+.modal-body > *,
+.auth-modal .field,
+.auth-modal .btn {
+  min-width: 0;
+  max-width: 100%;
+}
+.modal img,
+.modal video,
+.modal canvas {
+  max-width: 100%;
+  height: auto;
+}
+html.modal-open,
+body.modal-open {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
+@media (max-width: 700px) {
+  .modal-backdrop {
+    padding: max(8px, env(safe-area-inset-top, 0px)) 8px
+      max(8px, env(safe-area-inset-bottom, 0px));
+  }
+  .modal,
+  .modal.comments-modal {
+    width: 100%;
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+    border-radius: 14px;
+  }
+}
+@media (max-width: 360px) {
+  .modal-head,
+  .modal-body {
+    padding-inline: 12px;
+  }
+  .auth-modal .auth-social {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.modal-head {
+  min-width: 0;
+  gap: 12px;
+}
+.modal-head h2 {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.modal-head .icon-btn {
+  flex: 0 0 38px;
 }
