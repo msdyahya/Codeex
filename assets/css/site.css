@@ -3181,3 +3181,12 @@ body.modal-open {
   align-items: center;
   margin-inline: auto;
 }
+
+/* Decorative overflow in RTL created a negative scrollLeft and shifted dialog content right. */
+.modal.auth-modal {
+  overflow: clip;
+  scrollbar-gutter: auto;
+}
+.auth-modal .modal-body {
+  scrollbar-gutter: stable both-edges;
+}
