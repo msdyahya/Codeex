@@ -1630,8 +1630,23 @@
         activeMessages = [];
         renderFrame();
         if (pendingSharedPostId) {
-          authForm("login");
-          setAuthInfo("يلزم تسجيل الدخول لفتح المنشور.");
+          // A visitor opened /?post=ID. If that post is public, send them to its standalone
+          // public page instead of asking for login; only members-only / private-group posts need login.
+          (async () => {
+            const id = pendingSharedPostId;
+            try {
+              const isGroupLink = !!new URLSearchParams(location.search).get("group");
+              if (!isGroupLink && /^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+                const res = await fetch(`https://codna-f8612-default-rtdb.europe-west1.firebasedatabase.app/publicPostIndex/${encodeURIComponent(id)}.json`, { cache: "no-store" });
+                if (res.ok && (await res.json()) === true) {
+                  location.replace(`/post/${encodeURIComponent(id)}`);
+                  return;
+                }
+              }
+            } catch {}
+            authForm("login");
+            setAuthInfo("يلزم تسجيل الدخول لفتح المنشور.");
+          })();
         }
         return;
       }
