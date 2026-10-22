@@ -760,7 +760,27 @@
       avatarUrl: p.avatarUrl || "",
       tone: p.tone || "blue",
       groupId: p.groupId || "",
+      isPublic: p.isPublic === true && !p.groupId,
       fingerprint: p.fingerprint || "",
+      createdAt: Number(p.createdAt) || Date.now(),
+    };
+  }
+  /* Public copies contain only intentionally shareable fields. Owner IDs stay in a private path. */
+  function publicPostData(p) {
+    return {
+      id: p.id || "",
+      isPublic: true,
+      groupId: "",
+      name: p.name || "عضو Codeex",
+      handle: p.handle || "",
+      kind: p.kind || "نقاش",
+      title: p.title || "",
+      text: p.text || "",
+      code: p.code || "",
+      codeLanguage: p.codeLanguage || "javascript",
+      fileName: p.fileName || "",
+      tags: Array.isArray(p.tags) ? p.tags.slice(0, 5) : [],
+      tone: p.tone || "blue",
       createdAt: Number(p.createdAt) || Date.now(),
     };
   }
@@ -1342,12 +1362,33 @@
     const isEdit = !!editingPostId;
     await enforcePublishPolicy(p, isEdit);
     const group = p.groupId ? groups.find((g) => g.id === p.groupId) : null;
+    if (p.isPublic === true && (p.groupId || group))
+      throw new AppError("لا يمكن جعل منشور المجموعة عاماً؛ منشورات المجموعات لا تُنشر خارجها.");
+    const previousIsPublic = p.previouslyPublic === true || remoteRawPosts[p.id]?.data?.isPublic === true;
     const targetPath = group?.visibility === "private"
       ? `groupPosts/${group.id}/${p.id}/data`
       : `posts/${p.id}/data`;
-    // Database Rules authorize the authenticated owner and validate the payload.
-    // Write only the data node so comments and reactions are left untouched.
+    // The authenticated feed remains protected. A separate, minimized copy is published only
+    // for an explicitly public post; private group content is never written to publicPosts.
     await database.ref(targetPath).set(postData(p));
+    if (p.isPublic === true && !p.groupId) {
+      const ownerPath = `publicPostOwners/${p.id}`;
+      await database.ref(ownerPath).set(activeUser.uid);
+      try {
+        await database.ref(`publicPosts/${p.id}/data`).set(publicPostData(p));
+        await database.ref(`publicPostIndex/${p.id}`).set(true);
+      } catch (error) {
+        await database.ref(`publicPostIndex/${p.id}`).remove().catch(() => {});
+        await database.ref(`publicPosts/${p.id}/data`).remove().catch(() => {});
+        await database.ref(ownerPath).remove().catch(() => {});
+        throw error;
+      }
+    } else if (previousIsPublic) {
+      // Hide from the public sitemap first, then remove its public body and private owner marker.
+      await database.ref(`publicPostIndex/${p.id}`).remove();
+      await database.ref(`publicPosts/${p.id}/data`).remove();
+      await database.ref(`publicPostOwners/${p.id}`).remove();
+    }
     if (!isEdit) commitPublishPolicy(p);
   }
 
@@ -2171,13 +2212,27 @@
     else if (selectedCodeFileBytes > 0 && selectedCodeFileBytes > (discussion ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES)) clearSelectedCodeFile(true);
   }
 
+  function updatePublishVisibilityUI() {
+    const group = document.querySelector("#publishGroup"),
+      visibility = document.querySelector("#publishVisibility"),
+      hint = document.querySelector("#publishVisibilityHint");
+    if (!group || !visibility) return;
+    const inGroup = !!group.value;
+    if (inGroup && visibility.value === "public") visibility.value = "members";
+    visibility.disabled = inGroup;
+    if (hint) hint.textContent = inGroup
+      ? "منشورات المجموعات تبقى داخل المجموعة؛ لا تُعرض دون تسجيل الدخول أو خارج صلاحياتها."
+      : visibility.value === "public"
+        ? "عام (سيظهر في كل محركات البحث ولا يتطلب تسجيل دخول). سيتم إنشاء رابط مستقل وصورة مشاركة."
+        : "خاص بأعضاء Codeex المسجلين؛ لا يظهر في صفحات المشاركة العامة أو محركات البحث.";
+  }
   function renderCompose() {
     const user = currentUser();
     if (!user)
       return `${pageHeader("المشاركة في Codeex", "سجّل الدخول أولاً لتتمكن من النشر.", "")}<div class="panel empty-state"><b>تحتاج إلى حساب للمشاركة</b><button class="btn primary" data-auth="register">إنشاء حساب</button></div>`;
     return `${pageHeader("إنشاء مشاركة", "شارك فكرة أو مقالة أو مشروعاً مع المطورين العرب.", "")}<section class="panel"><form class="form-grid" id="publishForm"><label>نوع المشاركة<select class="field" id="publishKind"><option>نقاش</option><option>مقالة</option><option>مورد</option><option>مشروع</option></select></label><label>مكان النشر<select class="field" id="publishGroup"><option value="">المجتمع العام — يظهر المنشور في الرئيسية</option>${groups
       .filter((g) => g.visibility === "public" || isGroupMember(g))
-      .map((g) => `<option value="${esc(g.id)}">${esc(g.name)} — ${g.visibility === "private" ? "خاص" : "عام"}</option>`).join("")}</select></label><label>العنوان (اختياري للنقاش)<input class="field" id="publishTitle" maxlength="140" placeholder="عنوان واضح ومفيد"></label><label>التفاصيل<textarea class="field" id="publishText" maxlength="307200" placeholder="اكتب ما تريد مشاركته..." required></textarea></label><div><strong style="display:block;font-size:12px;color:#67758b">مقطع كود (اختياري)</strong><div style="display:flex;gap:8px;align-items:center;margin:5px 0 8px"><select class="field" id="publishLanguage" style="margin:0;max-width:180px"><option value="javascript">JavaScript</option><option value="typescript">TypeScript</option><option value="python">Python</option><option value="html">HTML</option><option value="css">CSS</option><option value="json">JSON</option><option value="java">Java</option><option value="php">PHP</option><option value="go">Go</option><option value="rust">Rust</option><option value="sql">SQL</option><option value="bash">Bash</option></select><label class="btn small" id="codeFileLabel" for="codeFile">اختيار ملف كود</label><input id="codeFile" type="file" accept=".js,.jsx,.ts,.tsx,.py,.html,.css,.json,.java,.php,.go,.rs,.c,.cpp,.cs,.sql,.sh,.txt" hidden></div><input id="codeFilename" type="hidden"><textarea class="code-editor" id="publishCode" maxlength="3145728" placeholder="الصق الكود هنا أو اختر ملفاً من جهازك"></textarea><small class="muted" id="publishPolicyHint"></small><br><small class="muted"></small></div><label>وسوم مفصولة بفاصلة<input class="field" id="publishTags" placeholder="React, JavaScript"></label><div class="modal-actions"><button class="btn" type="button" data-page="home">إلغاء</button><button class="btn primary" type="submit">نشر المشاركة</button></div></form></section>`;
+      .map((g) => `<option value="${esc(g.id)}">${esc(g.name)} — ${g.visibility === "private" ? "خاص" : "عام"}</option>`).join("")}</select></label><label>ظهور المنشور<select class="field" id="publishVisibility" aria-describedby="publishVisibilityHint"><option value="members">أعضاء Codeex فقط</option><option value="public">عام (سيظهر في كل محركات البحث ولا يتطلب تسجيل دخول)</option></select><small class="muted" id="publishVisibilityHint">خاص بأعضاء Codeex المسجلين؛ لا يظهر في صفحات المشاركة العامة أو محركات البحث.</small></label><label>العنوان (اختياري للنقاش)<input class="field" id="publishTitle" maxlength="140" placeholder="عنوان واضح ومفيد"></label><label>التفاصيل<textarea class="field" id="publishText" maxlength="307200" placeholder="اكتب ما تريد مشاركته..." required></textarea></label><div><strong style="display:block;font-size:12px;color:#67758b">مقطع كود (اختياري)</strong><div style="display:flex;gap:8px;align-items:center;margin:5px 0 8px"><select class="field" id="publishLanguage" style="margin:0;max-width:180px"><option value="javascript">JavaScript</option><option value="typescript">TypeScript</option><option value="python">Python</option><option value="html">HTML</option><option value="css">CSS</option><option value="json">JSON</option><option value="java">Java</option><option value="php">PHP</option><option value="go">Go</option><option value="rust">Rust</option><option value="sql">SQL</option><option value="bash">Bash</option></select><label class="btn small" id="codeFileLabel" for="codeFile">اختيار ملف كود</label><input id="codeFile" type="file" accept=".js,.jsx,.ts,.tsx,.py,.html,.css,.json,.java,.php,.go,.rs,.c,.cpp,.cs,.sql,.sh,.txt" hidden></div><input id="codeFilename" type="hidden"><textarea class="code-editor" id="publishCode" maxlength="3145728" placeholder="الصق الكود هنا أو اختر ملفاً من جهازك"></textarea><small class="muted" id="publishPolicyHint"></small><br><small class="muted"></small></div><label>وسوم مفصولة بفاصلة<input class="field" id="publishTags" placeholder="React, JavaScript"></label><div class="modal-actions"><button class="btn" type="button" data-page="home">إلغاء</button><button class="btn primary" type="submit">نشر المشاركة</button></div></form></section>`;
   }
 
   function renderSearch() {
@@ -2301,7 +2356,10 @@
       navigate(id);
       if (id === "compose" && pendingGroupId) {
         const groupSelect = document.querySelector("#publishGroup");
-        if (groupSelect) groupSelect.value = pendingGroupId;
+        if (groupSelect) {
+          groupSelect.value = pendingGroupId;
+          updatePublishVisibilityUI();
+        }
         pendingGroupId = "";
       }
       if (id === "compose" && pendingKind) {
@@ -2623,6 +2681,8 @@
                 : "نقاش",
         );
         v("#publishGroup", p.groupId);
+        v("#publishVisibility", p.isPublic === true ? "public" : "members");
+        updatePublishVisibilityUI();
         v("#publishTitle", p.title);
         v("#publishText", p.text);
         v("#publishLanguage", p.codeLanguage);
@@ -2653,9 +2713,13 @@
     }
     if (action === "share") {
       const post = findPost(act.dataset.id);
-      const shareUrl = new URL("/", location.origin);
-      shareUrl.searchParams.set("post", act.dataset.id);
-      if (post?.privateGroupId) shareUrl.searchParams.set("group", post.privateGroupId);
+      const shareUrl = post?.isPublic === true
+        ? new URL(`/post/${encodeURIComponent(post.id)}`, location.origin)
+        : new URL("/", location.origin);
+      if (post?.isPublic !== true) {
+        shareUrl.searchParams.set("post", act.dataset.id);
+        if (post?.privateGroupId) shareUrl.searchParams.set("group", post.privateGroupId);
+      }
       const u = shareUrl.toString();
       if (navigator.clipboard)
         navigator.clipboard
@@ -2801,6 +2865,8 @@
         avatarUrl: user.avatarUrl || "",
         tone: "blue",
         groupId,
+        isPublic: !groupId && document.querySelector("#publishVisibility").value === "public",
+        previouslyPublic: existing?.isPublic === true,
         kind,
         title: document.querySelector("#publishTitle").value.trim(),
         text,
@@ -2984,6 +3050,10 @@
   document.querySelector("#pageView").addEventListener("change", async (e) => {
     if (e.target.id === "publishKind") {
       updateComposePolicyUI();
+      return;
+    }
+    if (e.target.id === "publishGroup" || e.target.id === "publishVisibility") {
+      updatePublishVisibilityUI();
       return;
     }
     const input = e.target;
