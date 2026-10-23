@@ -1,0 +1,16 @@
+{
+  "name": "codeex-functions",
+  "private": true,
+  "description": "Trusted backend functions for Codeex",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.4.0"
+  }
+}

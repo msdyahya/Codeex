@@ -116,6 +116,8 @@
     activeMessages = [],
     activeChatRef = null,
     userUnsubs = [];
+  let notificationCleanupTimer = 0,
+    notificationMaintenancePending = new Set();
 
   let editingPostId = "",
     pendingKind = "",
@@ -143,6 +145,11 @@
     sharedAuthReady = false;
 
   let language = "ar"; // Arabic only
+  const NOTIFICATION_RETENTION_MS = 6 * 24 * 60 * 60 * 1000;
+  const COMMENT_USAGE_KEY = "__codeexUsageV1";
+  const MAX_POST_COMMENTS = 40;
+  const MAX_COMMENTS_PER_USER = 2;
+  const COMMENT_PAGE_SIZE = 10;
 
   let coreRefs = [],
     coreStarted = false,
@@ -205,11 +212,25 @@
       return noticeItems;
     },
     setNotices(items) {
+      const previous = new Map(noticeItems.map((n) => [n.id, n]));
       noticeItems = items;
-      if (activeUser) {
-        const obj = {};
-        items.forEach((n) => (obj[n.id] = n));
-        database.ref(`users/${activeUser.uid}/notifications`).set(obj).catch(handleError);
+      updateNotificationIndicator();
+      if (activeUser && database) {
+        const readPatch = {},
+          readAtPatch = {},
+          readAt = Date.now();
+        items.forEach((n) => {
+          if (!n.id || !n.read || previous.get(n.id)?.read) return;
+          readPatch[`${n.id}/read`] = true;
+          readAtPatch[`${n.id}/readAt`] = Number(n.readAt) || readAt;
+        });
+        const ref = database.ref(`users/${activeUser.uid}/notifications`);
+        if (Object.keys(readPatch).length)
+          ref.update(readPatch)
+            .then(() => Object.keys(readAtPatch).length
+              ? ref.update(readAtPatch).catch((error) => log.warn("Codeex: تعذّر تسجيل وقت قراءة الإشعار.", error))
+              : undefined)
+            .catch(handleError);
       }
     },
   };
@@ -547,6 +568,7 @@
       "المتصفح يمنع التخزين المطلوب لتسجيل الدخول؛ فعّل ملفات الارتباط ثم أعد المحاولة.",
     "auth/operation-not-supported-in-this-environment":
       "هذا المتصفح لا يدعم تسجيل الدخول بهذه الطريقة؛ افتح الموقع في المتصفح مباشرة.",
+    "functions/not-found": "خدمة التعليقات لم تُنشر بعد؛ حاول مرة أخرى لاحقاً.",
   };
 
   function describeError(err) {
@@ -788,6 +810,26 @@
   /* ==========================================================================
    Data layer
    ========================================================================== */
+  function normalizeComments(raw) {
+    return Object.entries(raw || {})
+      .filter(([id, comment]) => id !== COMMENT_USAGE_KEY && comment && typeof comment === "object" && typeof comment.uid === "string")
+      .map(([id, comment]) => ({ ...comment, id }))
+      .sort(
+        (a, b) =>
+          (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0) ||
+          String(b.id || "").localeCompare(String(a.id || "")),
+      );
+  }
+  function commentMetadata(raw, comments = normalizeComments(raw)) {
+    const meta = raw?.[COMMENT_USAGE_KEY] || {};
+    return {
+      total: Math.max(Number(meta.total) || 0, comments.length),
+      byUid: meta.byUid && typeof meta.byUid === "object" ? meta.byUid : {},
+    };
+  }
+  function postCommentCount(post) {
+    return Math.max(Number(post?.commentTotal) || 0, (post?.comments || []).length);
+  }
   function normalizePosts(raw, silent = false) {
     raw = raw || {};
     const base = { ...olderRaw, ...raw };
@@ -797,15 +839,16 @@
       .map(([id, v]) => {
         const d = v.data,
           reactions = v.reactions || {},
-          comments = Object.entries(v.comments || {})
-            .map(([commentId, c]) => ({ ...c, id: commentId }))
-            .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-        const likedBy = Object.keys(reactions).filter((uid) => reactions[uid] === true);
+          comments = normalizeComments(v.comments),
+          commentMeta = commentMetadata(v.comments, comments),
+          likedBy = Object.keys(reactions).filter((uid) => reactions[uid] === true);
         return {
           ...d,
           tags: Array.isArray(d.tags) ? d.tags : Object.values(d.tags || {}),
           id,
           comments,
+          commentTotal: commentMeta.total,
+          commentUsage: commentMeta.byUid,
           likedBy,
           likes: likedBy.length,
         };
@@ -1138,15 +1181,16 @@
           .filter(([, v]) => v?.data)
           .map(([id, v]) => {
             const reactions = v.reactions || {},
-              comments = Object.entries(v.comments || {})
-                .map(([commentId, c]) => ({ ...c, id: commentId }))
-                .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
+              comments = normalizeComments(v.comments),
+              commentMeta = commentMetadata(v.comments, comments),
               likedBy = Object.keys(reactions).filter((uid) => reactions[uid] === true);
             return {
               ...v.data,
               id,
               privateGroupId: g.id,
               comments,
+              commentTotal: commentMeta.total,
+              commentUsage: commentMeta.byUid,
               likedBy,
               likes: likedBy.length,
             };
@@ -1165,6 +1209,9 @@
   function stopUserWatchers() {
     userUnsubs.forEach((fn) => fn());
     userUnsubs = [];
+    clearTimeout(notificationCleanupTimer);
+    notificationCleanupTimer = 0;
+    notificationMaintenancePending.clear();
     if (activeChatRef) {
       activeChatRef.ref.off("value", activeChatRef.callback);
       activeChatRef = null;
@@ -1176,6 +1223,61 @@
       fn = (s) => callback(s.val() || {});
     r.on("value", fn, onListenError);
     userUnsubs.push(() => r.off("value", fn));
+  }
+
+  function maintainNotificationRetention(uid, raw) {
+    if (!database || !uid)
+      return Object.entries(raw || {}).map(([id, item]) => ({ ...item, id: item.id || id }));
+    const now = Date.now(),
+      retained = [];
+    let nextExpiry = Infinity;
+    for (const [id, item] of Object.entries(raw || {})) {
+      if (!item || typeof item !== "object") continue;
+      const note = { ...item, id: item.id || id };
+      if (note.read === true) {
+        let readAt = Number(note.readAt) || 0;
+        if (!readAt) {
+          readAt = now;
+          note.readAt = readAt;
+          const key = `stamp:${uid}:${id}`;
+          if (!notificationMaintenancePending.has(key)) {
+            notificationMaintenancePending.add(key);
+            database
+              .ref(`users/${uid}/notifications/${id}/readAt`)
+              .set(readAt)
+              .catch((error) => log.warn("Codeex: تعذّر تسجيل وقت قراءة الإشعار.", error))
+              .finally(() => notificationMaintenancePending.delete(key));
+          }
+        }
+        const expiresAt = readAt + NOTIFICATION_RETENTION_MS;
+        if (expiresAt <= now) {
+          const key = `delete:${uid}:${id}`;
+          if (!notificationMaintenancePending.has(key)) {
+            notificationMaintenancePending.add(key);
+            database
+              .ref(`users/${uid}/notifications/${id}`)
+              .remove()
+              .catch((error) => log.warn("Codeex: تعذّر حذف الإشعار القديم.", error))
+              .finally(() => notificationMaintenancePending.delete(key));
+          }
+          continue;
+        }
+        nextExpiry = Math.min(nextExpiry, expiresAt);
+      }
+      retained.push(note);
+    }
+    clearTimeout(notificationCleanupTimer);
+    if (Number.isFinite(nextExpiry)) {
+      notificationCleanupTimer = setTimeout(() => {
+        notificationCleanupTimer = 0;
+        if (activeUser?.uid !== uid) return;
+        const current = Object.fromEntries(noticeItems.filter((n) => n?.id).map((n) => [n.id, n]));
+        noticeItems = maintainNotificationRetention(uid, current);
+        updateNotificationIndicator();
+        if (page === "notifications") renderPage();
+      }, Math.min(Math.max(1, nextExpiry - now + 25), 2147483647));
+    }
+    return retained;
   }
 
   function updateNotificationIndicator() {
@@ -1197,7 +1299,7 @@
       if (!["compose", "messages", "settings"].includes(page)) renderPage();
     });
     watchUserPath(`users/${uid}/notifications`, (v) => {
-      noticeItems = Object.values(v);
+      noticeItems = maintainNotificationRetention(uid, v);
       updateNotificationIndicator();
       if (page === "notifications") renderPage();
     });
@@ -1402,13 +1504,39 @@
     if (!activeUser) throw new AppError("سجّل الدخول لإضافة تعليق.");
     const p = findPost(postId);
     if (!p) throw new AppError("المنشور غير متاح حالياً.");
-    const r = database.ref(`${postRootPath(p)}/comments`).push();
-    await r.set({ uid: activeUser.uid, name: activeUser.name, text, createdAt: Date.now() });
+    const comments = Array.isArray(p.comments) ? p.comments : [];
+    const ownCount = Math.max(
+      Number(p.commentUsage?.[activeUser.uid]) || 0,
+      comments.filter((comment) => comment.uid === activeUser.uid).length,
+    );
+    if (postCommentCount(p) >= MAX_POST_COMMENTS)
+      throw new AppError("وصل المنشور إلى الحد الأقصى وهو 40 تعليقاً.");
+    if (ownCount >= MAX_COMMENTS_PER_USER)
+      throw new AppError("يمكن لكل شخص إضافة تعليقين فقط على المنشور نفسه.");
+    if (!cloudFunctions) throw new AppError("خدمة التعليقات الآمنة غير متاحة حالياً؛ حاول مرة أخرى لاحقاً.");
+    const response = await cloudFunctions.httpsCallable("addComment")({
+      postId,
+      groupId: p.privateGroupId || "",
+      text,
+    });
+    const result = response?.data || {},
+      commentId = result.commentId,
+      savedComment = result.comment;
+    if (!commentId || !savedComment || savedComment.uid !== activeUser.uid)
+      throw new AppError("تعذّر التحقق من استجابة خدمة التعليقات.");
+    p.comments = [...comments, { ...savedComment, id: commentId }].sort(
+      (a, b) =>
+        (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0) ||
+        String(b.id || "").localeCompare(String(a.id || "")),
+    );
+    p.commentTotal = Math.max(Number(result.totalCount) || 0, p.comments.length);
+    p.commentUsage = { ...(p.commentUsage || {}), [activeUser.uid]: Number(result.userCommentCount) || ownCount + 1 };
+    scheduleRender();
     if (p.uid !== activeUser.uid) {
       try {
         await addNotification(p.uid, {
           postId,
-          commentId: r.key,
+          commentId,
           type: "comment",
           ...(p.privateGroupId ? { groupId: p.privateGroupId } : {}),
           text: `علّق ${activeUser.name} على منشورك.`,
@@ -1688,6 +1816,7 @@
       activateAppCheck();
       auth = firebase.auth(firebaseApp);
       database = firebase.database(firebaseApp);
+      cloudFunctions = firebase.functions ? firebase.app().functions("europe-west1") : null;
       if (auth) auth.useDeviceLanguage();
       try {
         if (location.protocol !== "file:" && firebase.analytics) firebase.analytics(firebaseApp);
@@ -1958,7 +2087,7 @@
     const user = currentUser();
     const liked = (p.likedBy || []).includes(user?.uid || "guest");
     const saved = Store.saved().includes(p.id);
-    return `<article class="panel post" data-post="${esc(p.id)}"><div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent(author)}</span><div class="post-ident"><strong>${profileLink(p.uid, author.name || p.name)}</strong> <span class="kind-pill ${p.kind === "سؤال" ? "question" : p.kind === "مقالة" ? "article" : ""}">${esc(p.kind || "نقاش")}</span><div class="post-meta" dir="rtl">@${esc(author.handle || p.handle || "member")} · ${timeAgo(p.createdAt || Date.now())}</div></div><button class="post-menu" data-action="post-menu" data-id="${esc(p.id)}" title="المزيد">${icon("dots")}</button></div>${p.title ? `<h3 class="post-title">${esc(p.title)}</h3>` : ""}${postTextPreview(p)}${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((t) => `<button class="tag" data-action="tag" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div><div class="post-footer"><button class="post-action like ${liked ? "active" : ""}" data-action="like" data-id="${esc(p.id)}">${icon("heart")}<span>${Number(p.likes || 0)}</span></button><button class="post-action" data-action="comment" data-id="${esc(p.id)}">${icon("comment")}<span>${(p.comments || []).length}</span></button><button class="post-action ${saved ? "active" : ""}" data-action="save" data-id="${esc(p.id)}">${icon("bookmark")}<span>${saved ? "محفوظ" : "حفظ"}</span></button><button class="post-action" data-action="share" data-id="${esc(p.id)}">${icon("share")}<span>مشاركة</span></button><button class="post-action more" data-action="expand" data-id="${esc(p.id)}">عرض المزيد ${icon("arrow")}</button></div></article>`;
+    return `<article class="panel post" data-post="${esc(p.id)}"><div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent(author)}</span><div class="post-ident"><strong>${profileLink(p.uid, author.name || p.name)}</strong> <span class="kind-pill ${p.kind === "سؤال" ? "question" : p.kind === "مقالة" ? "article" : ""}">${esc(p.kind || "نقاش")}</span><div class="post-meta" dir="rtl">@${esc(author.handle || p.handle || "member")} · ${timeAgo(p.createdAt || Date.now())}</div></div><button class="post-menu" data-action="post-menu" data-id="${esc(p.id)}" title="المزيد">${icon("dots")}</button></div>${p.title ? `<h3 class="post-title">${esc(p.title)}</h3>` : ""}${postTextPreview(p)}${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((t) => `<button class="tag" data-action="tag" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div><div class="post-footer"><button class="post-action like ${liked ? "active" : ""}" data-action="like" data-id="${esc(p.id)}">${icon("heart")}<span>${Number(p.likes || 0)}</span></button><button class="post-action" data-action="comment" data-id="${esc(p.id)}">${icon("comment")}<span>${postCommentCount(p)}</span></button><button class="post-action ${saved ? "active" : ""}" data-action="save" data-id="${esc(p.id)}">${icon("bookmark")}<span>${saved ? "محفوظ" : "حفظ"}</span></button><button class="post-action" data-action="share" data-id="${esc(p.id)}">${icon("share")}<span>مشاركة</span></button><button class="post-action more" data-action="expand" data-id="${esc(p.id)}">عرض المزيد ${icon("arrow")}</button></div></article>`;
   }
 
   function findPost(id) {
@@ -1986,14 +2115,15 @@
       const record = snapshot.val();
       if (!record?.data) throw new Error("post missing or unauthorized");
       const reactions = record.reactions || {};
-      const comments = Object.entries(record.comments || {})
-        .map(([commentId, comment]) => ({ ...comment, id: commentId }))
-        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      const comments = normalizeComments(record.comments),
+        commentMeta = commentMetadata(record.comments, comments);
       post = {
         ...record.data,
         id: postId,
         tags: Array.isArray(record.data.tags) ? record.data.tags : Object.values(record.data.tags || {}),
         comments,
+        commentTotal: commentMeta.total,
+        commentUsage: commentMeta.byUid,
         likedBy: Object.keys(reactions).filter((uid) => reactions[uid] === true),
         likes: Object.values(reactions).filter((liked) => liked === true).length,
         ...(groupId ? { privateGroupId: groupId } : {}),
@@ -2095,6 +2225,27 @@
   function renderResources() {
     const arr = filteredPosts("").filter((p) => p.kind === "مورد");
     return `${pageHeader("الموارد والمسارات", "موارد يشاركها المطورون فعلياً مع المجتمع.", '<button class="btn primary" data-page="compose" data-kind="resource">' + icon("plus") + " أضف مورداً</button>")}${arr.length ? arr.map(postCard).join("") : postsExhausted ? '<section class="panel empty-state"><b>لا توجد موارد منشورة بعد</b><p>انشر أول مورد أو مسار تعليمي للمجتمع.</p></section>' : ""}${feedSentinel()}`;
+  }
+
+  function renderCommentsModal(p, visibleCount = COMMENT_PAGE_SIZE) {
+    const comments = (p.comments || []).slice(0, MAX_POST_COMMENTS),
+      visible = Math.min(MAX_POST_COMMENTS, Math.max(COMMENT_PAGE_SIZE, visibleCount)),
+      shown = comments.slice(0, visible),
+      currentUid = currentUser()?.uid || "",
+      ownCount = Math.max(
+        Number(p.commentUsage?.[currentUid]) || 0,
+        comments.filter((comment) => comment.uid === currentUid).length,
+      ),
+      postFull = postCommentCount(p) >= MAX_POST_COMMENTS,
+      userFull = ownCount >= MAX_COMMENTS_PER_USER,
+      disabled = postFull || userFull,
+      remaining = Math.min(COMMENT_PAGE_SIZE, comments.length - shown.length),
+      limitMessage = postFull
+        ? "وصل المنشور إلى الحد الأقصى وهو 40 تعليقاً."
+        : userFull
+          ? "يمكن لكل شخص إضافة تعليقين فقط على المنشور نفسه."
+          : "";
+    return `<div class="comments-count muted">${Math.min(postCommentCount(p), MAX_POST_COMMENTS)} / ${MAX_POST_COMMENTS} تعليق</div><div class="comments-list" aria-live="polite">${shown.map((c) => `<article class="comment-card"><span class="avatar"${c.uid ? ` data-action="open-profile" data-uid="${esc(c.uid)}"` : ""}>${avatarContent(c)}</span><div class="comment-content"><div class="comment-head"><strong>${profileLink(c.uid, personName(c) || "عضو")}</strong><time>${timeAgo(c.createdAt || Date.now())}</time></div><p class="comment-body">${esc(c.text)}</p></div></article>`).join("") || '<p class="muted">لا توجد تعليقات بعد. كن أول من يشارك رأيه.</p>'}</div>${remaining > 0 ? `<div class="modal-actions"><button type="button" class="btn small" data-action="comments-more" data-id="${esc(p.id)}" data-visible="${shown.length}">عرض المزيد (${remaining} تعليقات)</button></div>` : ""}<form id="commentForm" class="comment-composer"><input type="hidden" id="commentPostId" value="${esc(p.id)}">${limitMessage ? `<p class="muted">${limitMessage}</p>` : ""}<textarea class="field" id="commentText" maxlength="400" placeholder="${disabled ? "وصلت إلى الحد المسموح للتعليقات على هذا المنشور." : "اكتب تعليقاً واضحاً ومحترماً..."}" ${disabled ? "disabled" : "required"}></textarea><div class="modal-actions"><button class="btn primary" type="submit" ${disabled ? "disabled" : ""}>إرسال التعليق</button></div></form>`;
   }
 
   function renderNotifications() {
@@ -2642,11 +2793,21 @@
       if (!requireUser()) return;
       const p = findPost(act.dataset.id);
       if (!p) return;
-      openModal(
-        "التعليقات",
-        `<div class="comments-list" aria-live="polite">${(p.comments || []).map((c) => `<article class="comment-card"><span class="avatar"${c.uid ? ` data-action="open-profile" data-uid="${esc(c.uid)}"` : ""}>${avatarContent(c)}</span><div class="comment-content"><div class="comment-head"><strong>${profileLink(c.uid, personName(c) || "عضو")}</strong><time>${timeAgo(c.createdAt || Date.now())}</time></div><p class="comment-body">${esc(c.text)}</p></div></article>`).join("") || '<p class="muted">لا توجد تعليقات بعد. كن أول من يشارك رأيه.</p>'}</div><form id="commentForm" class="comment-composer"><input type="hidden" id="commentPostId" value="${esc(p.id)}"><textarea class="field" id="commentText" maxlength="400" placeholder="اكتب تعليقاً واضحاً ومحترماً..." required></textarea><div class="modal-actions"><button class="btn primary" type="submit">إرسال التعليق</button></div></form>`,
-      );
+      openModal("التعليقات", renderCommentsModal(p));
       document.querySelector("#modalBackdrop .modal").classList.add("comments-modal");
+      return;
+    }
+    if (action === "comments-more") {
+      const p = findPost(act.dataset.id),
+        body = document.querySelector("#modalBody");
+      if (!p || !body) return;
+      const oldText = document.querySelector("#commentText")?.value || "",
+        scrollTop = body.scrollTop,
+        visible = Math.min(MAX_POST_COMMENTS, (Number(act.dataset.visible) || COMMENT_PAGE_SIZE) + COMMENT_PAGE_SIZE);
+      body.innerHTML = localizeMarkup(renderCommentsModal(p, visible));
+      body.scrollTop = scrollTop;
+      const input = document.querySelector("#commentText");
+      if (input) input.value = oldText;
       return;
     }
     if (action === "expand" || action === "read-post") {
@@ -2654,7 +2815,7 @@
       if (!p) return;
       openModal(
         p.title || "تفاصيل المشاركة",
-        `<div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent({ ...p, ...(publicProfiles[p.uid] || {}) })}</span><div class="post-ident"><strong>${profileLink(p.uid, personName(p))}</strong><div class="post-meta">${timeAgo(p.createdAt)}</div></div></div><p class="post-text">${renderPostTextWithLinks(p.text)}</p>${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((x) => `<span class="tag">#${esc(x)}</span>`).join("")}</div><div class="divider"></div><p class="muted">${(p.comments || []).length} تعليق · ${p.likes || 0} إعجاب</p>`,
+        `<div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent({ ...p, ...(publicProfiles[p.uid] || {}) })}</span><div class="post-ident"><strong>${profileLink(p.uid, personName(p))}</strong><div class="post-meta">${timeAgo(p.createdAt)}</div></div></div><p class="post-text">${renderPostTextWithLinks(p.text)}</p>${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((x) => `<span class="tag">#${esc(x)}</span>`).join("")}</div><div class="divider"></div><p class="muted">${postCommentCount(p)} تعليق · ${p.likes || 0} إعجاب</p>`,
       );
       return;
     }
@@ -2762,7 +2923,13 @@
       if (!requireUser()) return;
       const note = Store.notices().find((x) => x.id === act.dataset.id);
       if (!note) return;
-      if (!note.read) database.ref(`users/${activeUser.uid}/notifications/${note.id}/read`).set(true).catch(handleError);
+      if (!note.read) {
+        const ref = database.ref(`users/${activeUser.uid}/notifications/${note.id}`);
+        ref.child("read").set(true)
+          .then(() => ref.child("readAt").set(Date.now())
+            .catch((error) => log.warn("Codeex: تعذّر تسجيل وقت قراءة الإشعار.", error)))
+          .catch(handleError);
+      }
       if (note.type === "message" && note.actorUid && publicProfiles[note.actorUid]) {
         subscribeConversation(note.actorUid);
         navigate("messages");
@@ -2771,7 +2938,8 @@
     }
     if (action === "read-all") {
       if (!requireUser()) return;
-      Store.setNotices(Store.notices().map((n) => ({ ...n, read: true })));
+      const readAt = Date.now();
+      Store.setNotices(Store.notices().map((n) => ({ ...n, read: true, readAt: n.readAt || readAt })));
       renderPage();
       toast("تم تحديد الإشعارات كمقروءة");
       return;
@@ -3691,7 +3859,7 @@
    pending sign-in redirect) and otherwise on the first user interaction.
    ========================================================================== */
   const SDK_VERSION = "11.10.0";
-  const SDK_FILES = ["app", "app-check", "auth", "database"]; /* functions SDK was never used */
+  const SDK_FILES = ["app", "app-check", "auth", "database", "functions"];
   const SESSION_HINT = "codeex_session_hint_v1";
   let sdkRequested = false,
     sdkAttempts = 0;
