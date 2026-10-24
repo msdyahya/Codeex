@@ -284,9 +284,13 @@
 
   /* Always show the current profile name (falls back to the name stored on the item). */
   const personName = (x) => publicProfiles[x?.uid]?.name || x?.name || "";
+  /* The site admin (same uid that the Firebase rules treat as admin). */
+  const ADMIN_UID = "ck3SB5Fb05gjxUd6Hi6u3BdWpsv2";
+  const isAdminUid = (uid) => !!uid && uid === ADMIN_UID;
+  const ADMIN_BADGE = '<span class="admin-badge"><svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M12 2.5l8 3v6c0 5-3.4 8.7-8 10-4.6-1.3-8-5-8-10v-6l8-3z" fill="#fff" fill-opacity=".28" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/><path d="M8.5 12.2l2.5 2.5 4.5-5" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>أدمن الموقع</span>';
   const profileLink = (uid, name, cls = "author-profile-link") =>
     uid
-      ? `<button type="button" class="${cls}" data-action="open-profile" data-uid="${esc(uid)}">${esc(name)}</button>`
+      ? `<button type="button" class="${cls}" data-action="open-profile" data-uid="${esc(uid)}">${esc(name)}</button>${isAdminUid(uid) ? ADMIN_BADGE : ""}`
       : esc(name);
 
   function read(k, f) {
@@ -720,6 +724,10 @@
     validatePublishDraft(p, isEdit ? findPost(p.id) : null);
     if (isEdit) return;
     const fp = await sha256(postFingerprint(p));
+    if (isAdminUid(activeUser.uid)) {
+      p.fingerprint = fp; // the site admin has no cooldown, duplicate lock or publishing ban
+      return;
+    }
     const key = `codna-post-policy-v2:${activeUser.uid}`;
     const now = Date.now();
     let state = read(key, { lastProjectResourceAt: 0, lastFingerprint: "", strikes: 0, bannedUntil: 0 });
@@ -739,7 +747,7 @@
   }
 
   function commitPublishPolicy(p) {
-    if (!activeUser) return;
+    if (!activeUser || isAdminUid(activeUser.uid)) return;
     const key = `codna-post-policy-v2:${activeUser.uid}`;
     const state = read(key, { lastProjectResourceAt: 0, lastFingerprint: "", strikes: 0, bannedUntil: 0 });
     state.lastFingerprint = p.fingerprint || "";
@@ -1200,6 +1208,28 @@
     }
   }
 
+  const NOTICE_TTL_MS = 6 * 24 * 60 * 60 * 1000;
+  /* Read notifications are removed 6 days after they were read. Returns the ones that remain. */
+  function pruneNotifications(uid, raw) {
+    const now = Date.now(), keep = [];
+    for (const [key, n] of Object.entries(raw || {})) {
+      if (!n || typeof n !== "object") continue;
+      const id = n.id || key;
+      if (n.read === true) {
+        const readAt = Number(n.readAt) || 0;
+        if (!readAt) {
+          // Read before this feature existed: start the 6-day clock now.
+          database.ref(`users/${uid}/notifications/${id}/readAt`).set(now).catch(() => {});
+        } else if (now - readAt > NOTICE_TTL_MS) {
+          database.ref(`users/${uid}/notifications/${id}`).remove().catch(() => {});
+          continue;
+        }
+      }
+      keep.push({ ...n, id });
+    }
+    return keep;
+  }
+
   function syncUserState(uid) {
     stopUserWatchers();
     watchUserPath(`users/${uid}/saved`, (v) => {
@@ -1207,7 +1237,7 @@
       if (!["compose", "messages", "settings"].includes(page)) renderPage();
     });
     watchUserPath(`users/${uid}/notifications`, (v) => {
-      noticeItems = Object.values(v);
+      noticeItems = pruneNotifications(uid, v);
       updateNotificationIndicator();
       if (page === "notifications") renderPage();
     });
@@ -1408,17 +1438,49 @@
     await r.set({ ...note, id: r.key, actorUid: activeUser.uid, read: false, time: Date.now() });
   }
 
+  const COMMENT_PAGE = 10;
+  const MAX_COMMENTS_PER_USER = 2;
+  let commentsLimit = COMMENT_PAGE;
+  const myCommentCount = (p) => (p.comments || []).filter((c) => c.uid && c.uid === activeUser?.uid).length;
+
+  function commentCardHtml(c) {
+    return `<article class="comment-card"><span class="avatar"${c.uid ? ` data-action="open-profile" data-uid="${esc(c.uid)}"` : ""}>${avatarContent(c)}</span><div class="comment-content"><div class="comment-head"><strong>${profileLink(c.uid, personName(c) || "عضو")}</strong><time>${timeAgo(c.createdAt || Date.now())}</time></div><p class="comment-body">${esc(c.text)}</p></div></article>`;
+  }
+  /* Newest comments first; `limit` of them are shown, the rest sit behind a "show more" button (10 at a time). */
+  function commentsListHtml(p, limit) {
+    const sorted = [...(p.comments || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const shown = sorted.slice(0, limit), rest = sorted.length - shown.length;
+    const list = shown.map(commentCardHtml).join("") || '<p class="muted">لا توجد تعليقات بعد. كن أول من يشارك رأيه.</p>';
+    return list + (rest > 0 ? `<button type="button" class="btn ghost more-comments" data-action="more-comments" data-id="${esc(p.id)}">عرض المزيد (${Math.min(COMMENT_PAGE, rest)} من ${rest})</button>` : "");
+  }
+  function commentComposerHtml(p) {
+    const left = Math.max(0, MAX_COMMENTS_PER_USER - myCommentCount(p));
+    if (!left)
+      return `<p class="comment-limit">وصلت إلى الحد الأقصى: تعليقان لكل شخص على المنشور الواحد.</p>`;
+    const hint = language === "en" ? `You can add ${left} more of ${MAX_COMMENTS_PER_USER} comments on this post.` : `يمكنك إضافة ${left} من ${MAX_COMMENTS_PER_USER} تعليقات على هذا المنشور.`;
+    return `<form id="commentForm" class="comment-composer"><input type="hidden" id="commentPostId" value="${esc(p.id)}"><textarea class="field" id="commentText" maxlength="400" placeholder="اكتب تعليقاً واضحاً ومحترماً..." required></textarea><small class="muted comment-left">${esc(hint)}</small><div class="modal-actions"><button class="btn primary" type="submit">إرسال التعليق</button></div></form>`;
+  }
+
   async function addComment(postId, text) {
     if (!activeUser) throw new AppError("سجّل الدخول لإضافة تعليق.");
     const p = findPost(postId);
     if (!p) throw new AppError("المنشور غير متاح حالياً.");
-    const r = database.ref(`${postRootPath(p)}/comments`).push();
-    await r.set({ uid: activeUser.uid, name: activeUser.name, text, createdAt: Date.now() });
+    const limitMessage = "يمكنك التعليق مرتين فقط على المنشور الواحد.";
+    if (myCommentCount(p) >= MAX_COMMENTS_PER_USER) throw new AppError(limitMessage);
+    const base = postRootPath(p), uid = activeUser.uid;
+    // The server-side counter is what the Firebase rules check; it is written in the same update as the comment.
+    const used = Number((await database.ref(`${base}/commentCounts/${uid}`).once("value")).val()) || 0;
+    if (used >= MAX_COMMENTS_PER_USER) throw new AppError(limitMessage);
+    const key = database.ref(`${base}/comments`).push().key;
+    await database.ref().update({
+      [`${base}/comments/${key}`]: { uid, name: activeUser.name, text, createdAt: Date.now() },
+      [`${base}/commentCounts/${uid}`]: used + 1,
+    });
     if (p.uid !== activeUser.uid) {
       try {
         await addNotification(p.uid, {
           postId,
-          commentId: r.key,
+          commentId: key,
           type: "comment",
           ...(p.privateGroupId ? { groupId: p.privateGroupId } : {}),
           text: `علّق ${activeUser.name} على منشورك.`,
@@ -1847,7 +1909,7 @@
       groupCount = groups.length;
     const myPosts = Math.max(ownPostCount, localPosts);
     document.querySelector("#leftCol").innerHTML = localizeMarkup(
-      `<section class="panel profile-card"><div class="profile-top"><span class="avatar blue">${avatarContent(user)}</span><div><div class="profile-name">مرحباً ${esc(user.name || "")}</div><div class="profile-sub">مجتمع المطورين العرب</div></div></div><div class="profile-stats"><div><b>${myPosts}</b><span>مساهمة</span></div><div><b>${memberCount}</b><span>أعضاء</span></div><div><b>${groupCount}</b><span>مجموعة</span></div></div><button class="outline-wide" data-page="profile">${icon("user")}ملفي الشخصي</button></section><nav class="panel side-nav">${SIDE.map(([ic, label, id]) => `<button data-page="${id}" class="${page === id ? "active" : ""}">${icon(ic)}<span>${label}</span>${id === "notifications" && noticeItems.filter((n) => !n.read).length ? `<span class="nav-count">${noticeItems.filter((n) => !n.read).length}</span>` : ""}</button>`).join("")}<button data-page="resources">${icon("resource")}<span>الموارد والمسارات</span></button></nav><section class="panel side-cta"><div class="crown">⌘</div><h3>شارك معرفتك</h3><p>شارك فكرة أو مشروعاً ليستفيد منهما المطورون.</p><button class="btn primary small" data-page="compose">ابدأ المشاركة</button></section>`,
+      `<section class="panel profile-card"><div class="profile-top"><span class="avatar blue">${avatarContent(user)}</span><div><div class="profile-name">مرحباً ${esc(user.name || "")}</div><div class="profile-sub">${isAdminUid(user.uid) ? ADMIN_BADGE : "مجتمع المطورين العرب"}</div></div></div><div class="profile-stats"><div><b>${myPosts}</b><span>مساهمة</span></div><div><b>${memberCount}</b><span>أعضاء</span></div><div><b>${groupCount}</b><span>مجموعة</span></div></div><button class="outline-wide" data-page="profile">${icon("user")}ملفي الشخصي</button></section><nav class="panel side-nav">${SIDE.map(([ic, label, id]) => `<button data-page="${id}" class="${page === id ? "active" : ""}">${icon(ic)}<span>${label}</span>${id === "notifications" && noticeItems.filter((n) => !n.read).length ? `<span class="nav-count">${noticeItems.filter((n) => !n.read).length}</span>` : ""}</button>`).join("")}<button data-page="resources">${icon("resource")}<span>الموارد والمسارات</span></button></nav><section class="panel side-cta"><div class="crown">⌘</div><h3>شارك معرفتك</h3><p>شارك فكرة أو مشروعاً ليستفيد منهما المطورون.</p><button class="btn primary small" data-page="compose">ابدأ المشاركة</button></section>`,
     );
     const trendTags = [...new Set(cloudPosts.flatMap((p) => p.tags || []))].slice(0, 12);
     const groupBlock = groups.length
@@ -2958,7 +3020,7 @@
       return `${pageHeader("الرسائل", "تواصل مع أعضاء مجتمع Codeex.", "")}<div class="panel empty-state"><b>لا يوجد أعضاء مسجلون بعد</b>ستظهر المحادثات هنا بعد انضمام الأعضاء.</div>`;
     const chat = people.find((x) => x.uid === activeConversation) || people[0];
     const messages = chat.uid === activeConversation ? activeMessages : [];
-    return `${pageHeader("الرسائل", "محادثات مباشرة بين أعضاء Codeex المسجلين.", "")}<section class="panel messages-layout"><div class="conversation-list">${people.map((c) => `<button class="conversation ${c.uid === chat.uid ? "active" : ""}" data-action="conversation" data-id="${esc(c.uid)}"><span class="avatar small teal">${avatarContent(c)}</span><span><strong>${esc(c.name || "مطور")}</strong><small>@${esc(c.handle || "member")}</small></span></button>`).join("")}</div><div class="chat"><div class="chat-head">${profileLink(chat.uid, chat.name || "مطور")} <small class="muted" dir="ltr">@${esc(chat.handle || "member")}</small></div><div class="chat-body" id="chatBody">${messages.map((m) => `<div class="bubble ${m.uid === user.uid ? "own" : ""}">${esc(m.text)}</div>`).join("") || '<div class="muted">ابدأ المحادثة برسالة ترحيب.</div>'}</div><form class="chat-form" id="chatForm" data-to="${esc(chat.uid)}"><input class="field" id="chatInput" maxlength="1000" placeholder="اكتب رسالة..." required><button class="btn primary" type="submit">إرسال</button></form></div></section>`;
+    return `${pageHeader("الرسائل", "محادثات مباشرة بين أعضاء Codeex المسجلين.", "")}<section class="panel messages-layout"><div class="conversation-list">${people.map((c) => `<button class="conversation ${c.uid === chat.uid ? "active" : ""}" data-action="conversation" data-id="${esc(c.uid)}"><span class="avatar small teal">${avatarContent(c)}</span><span><strong>${esc(c.name || "مطور")}${isAdminUid(c.uid) ? ADMIN_BADGE : ""}</strong><small>@${esc(c.handle || "member")}</small></span></button>`).join("")}</div><div class="chat"><div class="chat-head">${profileLink(chat.uid, chat.name || "مطور")} <small class="muted" dir="ltr">@${esc(chat.handle || "member")}</small></div><div class="chat-body" id="chatBody">${messages.map((m) => `<div class="bubble ${m.uid === user.uid ? "own" : ""}">${esc(m.text)}</div>`).join("") || '<div class="muted">ابدأ المحادثة برسالة ترحيب.</div>'}</div><form class="chat-form" id="chatForm" data-to="${esc(chat.uid)}"><input class="field" id="chatInput" maxlength="1000" placeholder="اكتب رسالة..." required><button class="btn primary" type="submit">إرسال</button></form></div></section>`;
   }
 
   function renderSaved() {
@@ -3019,7 +3081,7 @@
         ? posts.map(postCard).join("")
         : `<div class="panel empty-state"><b>لا توجد منشورات بعد</b>${own?.uid === user.uid ? '<button class="btn" data-page="compose">ابدأ أول مشاركة</button>' : ""}</div>`;
     }
-    return `<section class="panel profile-cover"><div class="profile-cover-content"><div class="profile-avatar-wrap"><span class="avatar blue profile-avatar">${avatarContent(user)}</span>${isOwn ? '<label for="profileAvatar" class="avatar-edit" title="تغيير صورة الملف">✎</label><input id="profileAvatar" type="file" accept="image/png,image/jpeg,image/webp" hidden>' : ""}</div><div class="profile-details"><span class="pill">مطور في مجتمع Codeex</span><h1>${esc(user.name || "مطور")}</h1><div class="profile-handle">@${esc(user.handle || "developer")}</div><p class="profile-bio">${esc(user.bio || "لم يضف نبذة شخصية بعد.")}</p><div class="profile-meta">${joined ? `<span>${icon("calendar")} عضو منذ ${joined}</span>` : ""}</div></div>${isOwn ? `<button class="btn profile-cover-action" data-page="settings">${icon("settings")} تعديل الملف</button>` : `<div class="profile-cover-actions"><button class="btn primary" data-action="message-user" data-uid="${esc(user.uid)}">${icon("comment")} مراسلة</button><button class="btn" data-page="home">العودة</button></div>`}</div></section><section class="panel profile-summary"><div class="profile-stat"><b>${projects.length}</b><span>مشروع</span></div><div class="profile-stat"><b>${mine.length}</b><span>مساهمة</span></div><div class="profile-stat"><b>${articles.length}</b><span>مقالة</span></div></section><div class="profile-tabs"><button class="profile-tab ${profileTab === "projects" ? "active" : ""}" data-action="profile-tab" data-tab="projects">${icon("project")} المشاريع (${projects.length})</button><button class="profile-tab ${profileTab === "posts" ? "active" : ""}" data-action="profile-tab" data-tab="posts">${icon("file")} المنشورات</button><button class="profile-tab ${profileTab === "articles" ? "active" : ""}" data-action="profile-tab" data-tab="articles">${icon("article")} المقالات (${articles.length})</button>${isOwn ? `<button class="profile-tab ${profileTab === "saved" ? "active" : ""}" data-action="profile-tab" data-tab="saved">${icon("bookmark")} المحفوظات (${savedPosts.length})</button>` : ""}</div><div id="profileContent">${content}</div>`;
+    return `<section class="panel profile-cover"><div class="profile-cover-content"><div class="profile-avatar-wrap"><span class="avatar blue profile-avatar">${avatarContent(user)}</span>${isOwn ? '<label for="profileAvatar" class="avatar-edit" title="تغيير صورة الملف">✎</label><input id="profileAvatar" type="file" accept="image/png,image/jpeg,image/webp" hidden>' : ""}</div><div class="profile-details"><span class="pill${isAdminUid(user.uid) ? " admin-pill" : ""}">${isAdminUid(user.uid) ? "أدمن الموقع" : "مطور في مجتمع Codeex"}</span><h1>${esc(user.name || "مطور")}</h1><div class="profile-handle">@${esc(user.handle || "developer")}</div><p class="profile-bio">${esc(user.bio || "لم يضف نبذة شخصية بعد.")}</p><div class="profile-meta">${joined ? `<span>${icon("calendar")} عضو منذ ${joined}</span>` : ""}</div></div>${isOwn ? `<button class="btn profile-cover-action" data-page="settings">${icon("settings")} تعديل الملف</button>` : `<div class="profile-cover-actions"><button class="btn primary" data-action="message-user" data-uid="${esc(user.uid)}">${icon("comment")} مراسلة</button><button class="btn" data-page="home">العودة</button></div>`}</div></section><section class="panel profile-summary"><div class="profile-stat"><b>${projects.length}</b><span>مشروع</span></div><div class="profile-stat"><b>${mine.length}</b><span>مساهمة</span></div><div class="profile-stat"><b>${articles.length}</b><span>مقالة</span></div></section><div class="profile-tabs"><button class="profile-tab ${profileTab === "projects" ? "active" : ""}" data-action="profile-tab" data-tab="projects">${icon("project")} المشاريع (${projects.length})</button><button class="profile-tab ${profileTab === "posts" ? "active" : ""}" data-action="profile-tab" data-tab="posts">${icon("file")} المنشورات</button><button class="profile-tab ${profileTab === "articles" ? "active" : ""}" data-action="profile-tab" data-tab="articles">${icon("article")} المقالات (${articles.length})</button>${isOwn ? `<button class="profile-tab ${profileTab === "saved" ? "active" : ""}" data-action="profile-tab" data-tab="saved">${icon("bookmark")} المحفوظات (${savedPosts.length})</button>` : ""}</div><div id="profileContent">${content}</div>`;
   }
 
   function renderSettings() {
@@ -3054,6 +3116,8 @@
       : discussion
         ? (language === "en" ? "Discussion text/code total: up to 300 KB." : "النقاش: مجموع النص والكود حتى 300 كيلوبايت.")
         : (language === "en" ? `Project/resource code: up to 3 MB; one uploaded file every 7 days; 10 minutes between posts.` : "المشروع/المورد: كود حتى 3 ميجابايت، ملف واحد كل 7 أيام، وفاصل 10 دقائق بين المنشورات.");
+    if (hint && isAdminUid(activeUser?.uid))
+      hint.textContent += language === "en" ? " As the site admin you have no limit on how many posts you publish or when." : " بصفتك أدمن الموقع: لا توجد حدود على عدد منشوراتك أو على توقيت النشر.";
     if (article && selectedCodeFileBase64) clearSelectedCodeFile(true);
     else if (selectedCodeFileBytes > 0 && selectedCodeFileBytes > (discussion ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES)) clearSelectedCodeFile(true);
     syncMediaExclusivity();
@@ -3082,9 +3146,38 @@
       .map((g) => `<option value="${esc(g.id)}">${esc(g.name)} — ${g.visibility === "private" ? "خاص" : "عام"}</option>`).join("")}</select></label><label>ظهور المنشور<select class="field" id="publishVisibility" aria-describedby="publishVisibilityHint"><option value="members">أعضاء Codeex فقط</option><option value="public">عام (سيظهر في كل محركات البحث ولا يتطلب تسجيل دخول)</option></select><small class="muted" id="publishVisibilityHint">خاص بأعضاء Codeex المسجلين؛ لا يظهر في صفحات المشاركة العامة أو محركات البحث.</small></label><label>العنوان (اختياري للنقاش)<input class="field" id="publishTitle" maxlength="140" placeholder="عنوان واضح ومفيد"></label><label>التفاصيل<textarea class="field" id="publishText" maxlength="307200" placeholder="اكتب ما تريد مشاركته..." required></textarea></label><div class="video-attach" id="videoAttach"><strong class="attach-title">فيديو (اختياري)</strong><div class="video-input-row"><input class="field" id="publishVideo" type="text" inputmode="url" dir="ltr" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://www.youtube.com/watch?v=… | https://archive.org/details/…"><button type="button" class="btn small ghost" id="videoClear" data-action="clear-video" hidden>إزالة الفيديو</button></div><div class="video-status" id="videoStatus" role="status" aria-live="polite"></div><div id="videoPreview"></div><small class="field-hint" id="videoLock" hidden></small><small class="field-hint">يُدعم يوتيوب وأرشيف الإنترنت (archive.org). نتحقق من أن الفيديو يعمل قبل النشر، وإذا أضفت فيديو فلا يمكن إرفاق كود أو ملف معه.</small><input type="hidden" id="videoProvider"><input type="hidden" id="videoId"></div><div class="code-attach" id="codeAttach"><strong class="attach-title">مقطع كود (اختياري)</strong><div id="codeAttachBody"></div><input id="codeFile" type="file" accept=".js,.jsx,.ts,.tsx,.py,.html,.css,.json,.java,.php,.go,.rs,.c,.cpp,.cs,.sql,.sh,.txt" hidden><textarea id="publishCode" hidden maxlength="3145728"></textarea><input id="publishLanguage" type="hidden" value="javascript"><input id="codeFilename" type="hidden"><small class="muted" id="publishPolicyHint"></small></div><label>وسوم مفصولة بفاصلة<input class="field" id="publishTags" placeholder="React, JavaScript"></label><div class="modal-actions"><button class="btn" type="button" data-page="home">إلغاء</button><button class="btn primary" type="submit">نشر المشاركة</button></div></form></section>`;
   }
 
+  const searchHit = (text) => !!searchTerm && String(text || "").toLowerCase().includes(searchTerm.toLowerCase());
+  const groupOfPost = (p) => groups.find((g) => g.id === (p.privateGroupId || p.groupId));
+  /* Searches every post the member can see: the community feed plus the private groups they belong to. */
+  function searchPosts() {
+    if (!searchTerm) return [];
+    const seen = new Set();
+    return [...Store.posts(), ...Object.values(privateGroupPosts || {}).flat()]
+      .filter((p) => {
+        if (!p || seen.has(p.id)) return false;
+        seen.add(p.id);
+        return searchHit(`${p.name} ${p.title || ""} ${p.text} ${(p.tags || []).join(" ")} ${groupOfPost(p)?.name || ""}`);
+      })
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }
+
   function renderSearch() {
-    const arr = allPosts();
-    return `${pageHeader(`نتائج البحث: ${esc(searchTerm)}`, "المنشورات المطابقة في مجتمع Codeex.", "")} ${arr.length ? arr.map(postCard).join("") : '<div class="panel empty-state"><b>لم نجد نتائج</b>جرّب كلمات بحث مختلفة.</div>'}`;
+    const arr = searchPosts();
+    const joined = groups.filter((g) => isGroupMember(g) && searchHit(`${g.name} ${g.description || ""}`));
+    const groupHtml = joined.length
+      ? `<h3 class="search-section">مجموعاتك المطابقة (${joined.length})</h3><div class="search-group-list">${joined
+          .map(
+            (g) =>
+              `<article class="panel search-group"><div class="search-group-info"><strong>${esc(g.name)}</strong><span class="group-visibility ${esc(g.visibility)}">${g.visibility === "private" ? icon("lock") + " خاصة" : "عامّة"}</span><p>${esc(g.description || "مجموعة أنشأها عضو في المجتمع.")}</p></div><button type="button" class="btn small primary" data-action="group-open" data-id="${esc(g.id)}">دخول المجموعة</button></article>`,
+          )
+          .join("")}</div>`
+      : "";
+    const postsHtml = arr.length
+      ? `<h3 class="search-section">المنشورات المطابقة (${arr.length})</h3>${arr.map(postCard).join("")}`
+      : joined.length
+        ? ""
+        : '<div class="panel empty-state"><b>لم نجد نتائج</b>جرّب كلمات بحث مختلفة.</div>';
+    return `${pageHeader(`نتائج البحث: ${esc(searchTerm)}`, "المنشورات والمجموعات المطابقة، بما فيها مجموعاتك العامة والخاصة.", "")} ${groupHtml}${postsHtml}`;
   }
 
   function renderPage() {
@@ -3489,14 +3582,20 @@
       toast(i >= 0 ? "أزل من المحفوظات" : "أضيف إلى المحفوظات");
       return;
     }
+    if (action === "more-comments") {
+      const p = findPost(act.dataset.id);
+      const list = document.querySelector("#modalBackdrop .comments-list");
+      if (!p || !list) return;
+      commentsLimit += COMMENT_PAGE;
+      list.innerHTML = localizeMarkup(commentsListHtml(p, commentsLimit));
+      return;
+    }
     if (action === "comment") {
       if (!requireUser()) return;
       const p = findPost(act.dataset.id);
       if (!p) return;
-      openModal(
-        "التعليقات",
-        `<div class="comments-list" aria-live="polite">${(p.comments || []).map((c) => `<article class="comment-card"><span class="avatar"${c.uid ? ` data-action="open-profile" data-uid="${esc(c.uid)}"` : ""}>${avatarContent(c)}</span><div class="comment-content"><div class="comment-head"><strong>${profileLink(c.uid, personName(c) || "عضو")}</strong><time>${timeAgo(c.createdAt || Date.now())}</time></div><p class="comment-body">${esc(c.text)}</p></div></article>`).join("") || '<p class="muted">لا توجد تعليقات بعد. كن أول من يشارك رأيه.</p>'}</div><form id="commentForm" class="comment-composer"><input type="hidden" id="commentPostId" value="${esc(p.id)}"><textarea class="field" id="commentText" maxlength="400" placeholder="اكتب تعليقاً واضحاً ومحترماً..." required></textarea><div class="modal-actions"><button class="btn primary" type="submit">إرسال التعليق</button></div></form>`,
-      );
+      commentsLimit = COMMENT_PAGE;
+      openModal("التعليقات", `<div class="comments-list" aria-live="polite">${commentsListHtml(p, commentsLimit)}</div>${commentComposerHtml(p)}`);
       document.querySelector("#modalBackdrop .modal").classList.add("comments-modal");
       return;
     }
@@ -3616,7 +3715,7 @@
       if (!requireUser()) return;
       const note = Store.notices().find((x) => x.id === act.dataset.id);
       if (!note) return;
-      if (!note.read) database.ref(`users/${activeUser.uid}/notifications/${note.id}/read`).set(true).catch(handleError);
+      if (!note.read) database.ref(`users/${activeUser.uid}/notifications/${note.id}`).update({ read: true, readAt: Date.now() }).catch(handleError);
       if (note.type === "message" && note.actorUid && publicProfiles[note.actorUid]) {
         subscribeConversation(note.actorUid);
         navigate("messages");
@@ -3625,7 +3724,7 @@
     }
     if (action === "read-all") {
       if (!requireUser()) return;
-      Store.setNotices(Store.notices().map((n) => ({ ...n, read: true })));
+      Store.setNotices(Store.notices().map((n) => (n.read ? n : { ...n, read: true, readAt: Date.now() })));
       renderPage();
       toast("تم تحديد الإشعارات كمقروءة");
       return;
@@ -4295,6 +4394,13 @@
     "اختصارات الكتابة": "Typing shortcuts",
     "إزالة الفيديو": "Remove video",
     "تجاهل التعديلات على الكود؟": "Discard the changes to the code?",
+    "أدمن الموقع": "Site admin",
+    "عرض المزيد": "Show more",
+    "وصلت إلى الحد الأقصى: تعليقان لكل شخص على المنشور الواحد.": "Limit reached: each person can comment twice on a post.",
+    "يمكنك التعليق مرتين فقط على المنشور الواحد.": "You can comment only twice on the same post.",
+    "مجموعاتك المطابقة": "Matching groups you joined",
+    "المنشورات المطابقة": "Matching posts",
+    "المنشورات والمجموعات المطابقة، بما فيها مجموعاتك العامة والخاصة.": "Matching posts and groups, including your public and private groups.",
   };
 
   Object.assign(EN, {
