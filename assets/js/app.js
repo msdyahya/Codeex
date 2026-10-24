@@ -666,7 +666,7 @@
    Publishing rules
    ========================================================================== */
   function postFingerprint(p) {
-    return [p.kind, p.title, p.text, p.code, p.codeLanguage]
+    return [p.kind, p.title, p.text, p.code, p.codeLanguage, p.videoId]
       .map((x) =>
         String(x || "")
           .trim()
@@ -707,6 +707,12 @@
       throw new AppError(language === "en" ? "Project/resource code cannot exceed 3 MB." : "لا يمكن أن يتجاوز كود المشروع أو المورد 3 ميجابايت.");
     if (isArticle && selectedCodeFileBase64)
       throw new AppError(language === "en" ? "Articles cannot include an uploaded file." : "لا يمكن إرفاق ملف بالمقالة.");
+    if (p.videoId || p.videoProvider) {
+      if (!isValidVideoId(p.videoProvider, p.videoId))
+        throw new AppError(language === "en" ? "The video link is not valid." : "رابط الفيديو غير صالح.");
+      if (String(p.code || "").trim() || p.fileName || selectedCodeFileBase64)
+        throw new AppError(language === "en" ? "A post with a video cannot include code or a file." : "لا يمكن إرفاق كود أو ملف مع الفيديو.");
+    }
   }
 
   async function enforcePublishPolicy(p, isEdit = false) {
@@ -756,6 +762,8 @@
       codeLanguage: p.codeLanguage || "javascript",
       fileName: p.fileName || "",
       fileSize: Number(p.fileSize) || 0,
+      videoProvider: safeVideo(p)?.provider || "",
+      videoId: safeVideo(p)?.id || "",
       tags: Array.isArray(p.tags) ? p.tags.slice(0, 5) : [],
       avatarUrl: p.avatarUrl || "",
       tone: p.tone || "blue",
@@ -779,6 +787,8 @@
       code: p.code || "",
       codeLanguage: p.codeLanguage || "javascript",
       fileName: p.fileName || "",
+      videoProvider: safeVideo(p)?.provider || "",
+      videoId: safeVideo(p)?.id || "",
       tags: Array.isArray(p.tags) ? p.tags.slice(0, 5) : [],
       tone: p.tone || "blue",
       createdAt: Number(p.createdAt) || Date.now(),
@@ -1869,72 +1879,893 @@
     return `<section class="panel composer"><div class="composer-row"><span class="avatar small blue">${avatarContent(user)}</span><button class="composer-trigger" data-page="compose">ماذا تريد أن تشارك اليوم؟</button></div><div class="composer-tools"><button data-page="compose" data-kind="article">${icon("article")} مقالة</button><button data-page="compose" data-kind="discussion">${icon("comment")} نقاش</button><button data-page="compose" data-kind="resource">${icon("link")} مورد</button></div></section>`;
   }
 
-  function highlightCodeLine(line, language = "javascript") {
-    const keywords = new Set(
-      "abstract as async await break case catch class const continue debugger default delete do else enum export extends finally for from function get if implements import in instanceof interface let new of package private protected public return set static super switch this throw try type typeof var void while with yield def lambda pass raise self True False None print import from as for in if elif else try except class return yield async await match case fn pub mod use impl struct enum trait mut let const static crate super return match loop while break continue fallthrough package func defer go chan select map range type var import interface nil true false null undefined NaN new throw extends constructor instanceof typeof void delete debugger with this super default export from as async await await".split(
-        /\s+/,
-      ),
-    );
-    const re =
-      /\/\/.*$|\/\*.*?\*\/|--.*$|#.*$|\x3c!--.*?-->|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*\b/g;
-    let out = "",
-      last = 0,
-      m;
-    while ((m = re.exec(line))) {
-      out += esc(line.slice(last, m.index));
-      const t = m[0];
-      let cls = "";
-      if (
-        t.startsWith("//") ||
-        t.startsWith("/*") ||
-        t.startsWith("--") ||
-        t.startsWith("#") ||
-        t.startsWith("\x3c!--")
-      )
-        cls = "syn-comment";
-      else if (/^['"`]/.test(t)) cls = "syn-string";
-      else if (/^\d/.test(t)) cls = "syn-number";
-      else if (keywords.has(t)) cls = "syn-key";
-      else if (/[A-Za-z_$][\w$]*$/.test(t) && /^\s*\(/.test(line.slice(re.lastIndex)))
-        cls = "syn-function";
-      out += cls ? `<span class="${cls}">${esc(t)}</span>` : esc(t);
-      last = re.lastIndex;
+  /* >>> CODEEX_MEDIA_START — video embeds, per-language syntax highlighting and the code studio */
+
+  /* ---------- Languages (VS Code "Dark+" look) ---------- */
+  const LANG_ALIASES = {
+    js: "javascript", ts: "typescript", py: "python", rs: "rust", sh: "bash", shell: "bash", zsh: "bash",
+    cs: "csharp", "c#": "csharp", "c++": "cpp", cc: "cpp", yml: "yaml", kt: "kotlin", rb: "ruby",
+    golang: "go", htm: "html", txt: "text", plaintext: "text",
+  };
+  const JS_KW = "var let const function class extends new this super static async get set typeof instanceof void delete in of null undefined true false NaN Infinity";
+  const JS_CTRL = "if else for while do switch case default break continue return try catch finally throw with debugger import export from as await yield";
+  const JS_TYPES = "Array Object String Number Boolean Map Set WeakMap Promise Date RegExp Error JSON Math Symbol BigInt console window document";
+  const TS_KW = `${JS_KW} interface type enum implements namespace declare abstract readonly private public protected keyof infer is satisfies override module`;
+  const TS_TYPES = `${JS_TYPES} any unknown never number string boolean object unique symbol`;
+  const LANGS = {
+    javascript: { label: "JavaScript", ext: "js", kind: "c", indent: 2, regex: true, cap: true, tpl: true, at: false, lc: ["//"], bc: ["/*", "*/"], q: "\"'`", kw: JS_KW, ctrl: JS_CTRL, types: JS_TYPES },
+    typescript: { label: "TypeScript", ext: "ts", kind: "c", indent: 2, regex: true, cap: true, tpl: true, at: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'`", kw: TS_KW, ctrl: JS_CTRL, types: TS_TYPES },
+    jsx: { label: "JSX", ext: "jsx", kind: "c", indent: 2, regex: true, cap: true, tpl: true, jsx: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'`", kw: JS_KW, ctrl: JS_CTRL, types: JS_TYPES },
+    tsx: { label: "TSX", ext: "tsx", kind: "c", indent: 2, regex: true, cap: true, tpl: true, at: true, jsx: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'`", kw: TS_KW, ctrl: JS_CTRL, types: TS_TYPES },
+    python: { label: "Python", ext: "py", kind: "c", indent: 4, cap: true, at: true, tq: true, pystr: true, lc: ["#"], q: "\"'", kw: "def class lambda None True False self cls and or not in is as global nonlocal pass del with async", ctrl: "if elif else for while break continue return try except finally raise import from assert match case yield await", types: "int str float bool list dict set tuple bytes object complex frozenset" },
+    html: { label: "HTML", ext: "html", kind: "html", indent: 2 },
+    css: { label: "CSS", ext: "css", kind: "css", indent: 2 },
+    json: { label: "JSON", ext: "json", kind: "json", indent: 2 },
+    yaml: { label: "YAML", ext: "yml", kind: "yaml", indent: 2 },
+    java: { label: "Java", ext: "java", kind: "c", indent: 4, cap: true, at: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'", kw: "public private protected static final abstract class interface enum extends implements new this super void null true false instanceof synchronized volatile transient native package throws var record sealed permits", ctrl: "if else for while do switch case default break continue return try catch finally throw import assert yield", types: "int long short byte char float double boolean String Object Integer List Map Set ArrayList HashMap Exception System" },
+    kotlin: { label: "Kotlin", ext: "kt", kind: "c", indent: 4, cap: true, at: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'", kw: "val var fun class object interface enum data sealed open abstract override private public protected internal companion init constructor this super null true false is as in by lateinit suspend inline typealias", ctrl: "if else when for while do break continue return try catch finally throw import package", types: "Int Long Short Byte Float Double Boolean String Char Unit Any Nothing List Map Set Array" },
+    c: { label: "C", ext: "c", kind: "c", indent: 4, pre: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'", kw: "struct union enum typedef static extern const volatile register inline sizeof void auto signed unsigned NULL true false", ctrl: "if else for while do switch case default break continue return goto", types: "int char short long float double bool size_t uint8_t uint16_t uint32_t uint64_t int8_t int16_t int32_t int64_t FILE" },
+    cpp: { label: "C++", ext: "cpp", kind: "c", indent: 4, pre: true, cap: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'", kw: "struct union enum typedef static extern const volatile inline sizeof void auto signed unsigned class namespace template typename public private protected virtual override final new delete this using operator friend constexpr nullptr explicit noexcept decltype true false", ctrl: "if else for while do switch case default break continue return goto try catch throw static_cast dynamic_cast reinterpret_cast const_cast", types: "int char short long float double bool size_t string vector map set unique_ptr shared_ptr std wstring array" },
+    csharp: { label: "C#", ext: "cs", kind: "c", indent: 4, cap: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'", kw: "class struct interface enum namespace using public private protected internal static readonly const abstract virtual override sealed new this base null true false var dynamic async await out ref in is as typeof sizeof delegate event params partial get set value record init required", ctrl: "if else for foreach while do switch case default break continue return try catch finally throw yield goto lock", types: "int long short byte char float double decimal bool string object void List Dictionary Task IEnumerable" },
+    go: { label: "Go", ext: "go", kind: "c", indent: 4, lc: ["//"], bc: ["/*", "*/"], q: "\"'`", mq: true, kw: "package import func var const type struct interface map chan go defer nil true false iota make new len cap append panic recover", ctrl: "if else for switch case default break continue return goto select fallthrough range", types: "int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 string bool byte rune error any" },
+    rust: { label: "Rust", ext: "rs", kind: "c", indent: 4, cap: true, rust: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'", kw: "fn let mut const static struct enum impl trait type mod use pub crate self Self super as where move ref dyn unsafe async await extern box true false", ctrl: "if else for while loop match break continue return in", types: "i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str String Vec Option Result Box Rc Arc HashMap Some None Ok Err" },
+    php: { label: "PHP", ext: "php", kind: "c", indent: 4, cap: true, php: true, dollar: true, lc: ["//", "#"], bc: ["/*", "*/"], q: "\"'", kw: "function class interface trait extends implements new public private protected static final abstract const var namespace use null true false self parent this array echo print isset unset empty global", ctrl: "if else elseif for foreach while do switch case default break continue return try catch finally throw match require include require_once include_once", types: "int float string bool array object void mixed callable iterable" },
+    ruby: { label: "Ruby", ext: "rb", kind: "c", indent: 2, cap: true, ruby: true, lc: ["#"], q: "\"'", kw: "def class module end self nil true false super yield lambda proc do begin rescue ensure raise attr_accessor attr_reader attr_writer include extend require require_relative private public protected alias undef then", ctrl: "if elsif else unless case when while until for in break next redo retry return and or not", types: "" },
+    swift: { label: "Swift", ext: "swift", kind: "c", indent: 4, cap: true, at: true, lc: ["//"], bc: ["/*", "*/"], q: "\"", kw: "let var func class struct enum protocol extension init deinit self super nil true false static private public internal fileprivate open final lazy weak unowned override mutating throws rethrows async await where is as in inout some any", ctrl: "if else guard switch case default for while repeat break continue return fallthrough do try catch throw import defer", types: "Int Double Float Bool String Character Array Dictionary Set Optional Void Any" },
+    dart: { label: "Dart", ext: "dart", kind: "c", indent: 2, cap: true, at: true, lc: ["//"], bc: ["/*", "*/"], q: "\"'", kw: "var final const class extends implements with mixin abstract static void dynamic late required new this super null true false is as async sync enum typedef extension on get set factory", ctrl: "if else for while do switch case default break continue return try catch finally throw rethrow import export part library show hide assert await yield", types: "int double num bool String List Map Set Future Stream Object" },
+    lua: { label: "Lua", ext: "lua", kind: "c", indent: 2, lc: ["--"], bc: ["--[[", "]]"], q: "\"'", kw: "local function end nil true false and or not", ctrl: "if then else elseif for while do repeat until break return in goto", types: "" },
+    sql: { label: "SQL", ext: "sql", kind: "c", indent: 2, ci: true, lc: ["--"], bc: ["/*", "*/"], q: "\"'`", kw: "select from where insert into values update set delete create alter drop table database index view primary key foreign references default not null unique check constraint add column join inner left right full outer cross on group by order having limit offset union all distinct as and or in is between like exists case when then else end asc desc count sum avg min max with begin commit rollback truncate if returns function procedure trigger", ctrl: "", types: "int integer bigint smallint tinyint varchar char text boolean bool date datetime timestamp float double decimal numeric json blob serial uuid" },
+    bash: { label: "Bash", ext: "sh", kind: "c", indent: 2, dollar: true, rawq: true, lc: ["#"], q: "\"'", kw: "function local export readonly declare unset alias source", ctrl: "if then else elif fi for while until do done case esac in select return break continue exit", types: "echo cd ls cat grep sed awk mkdir rm cp mv chmod chown sudo apt npm git curl wget pip python node docker" },
+    text: { label: "Text", ext: "txt", kind: "text", indent: 2 },
+  };
+  const LANG_ORDER = ["javascript", "typescript", "jsx", "tsx", "python", "html", "css", "json", "java", "kotlin", "c", "cpp", "csharp", "go", "rust", "php", "ruby", "swift", "dart", "sql", "bash", "yaml", "lua", "text"];
+  const normLang = (lang) => {
+    const k = String(lang || "").toLowerCase().trim();
+    const key = LANG_ALIASES[k] || k;
+    return LANGS[key] ? key : "text";
+  };
+  const langSpec = (lang) => LANGS[normLang(lang)];
+  const codeFileName = (lang) => `snippet.${langSpec(lang).ext}`;
+  const wordSet = (s) => new Set(String(s || "").split(" ").filter(Boolean));
+  const langSets = (spec) =>
+    (spec._s ||= { kw: wordSet(spec.kw), ctrl: wordSet(spec.ctrl), types: wordSet(spec.types) });
+  const DECL_FN = new Set(["function", "def", "fn", "func", "fun"]);
+  const DECL_TYPE = new Set(["class", "struct", "interface", "enum", "trait", "type", "namespace", "module", "object", "impl", "record", "protocol", "extension", "union", "new", "extends", "implements"]);
+  const RE_ID = /[A-Za-z_$][\w$]*/y;
+  const RE_NUM = /(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*\.?[\d_]*|\.\d[\d_]*)(?:[eE][+-]?\d+)?)[a-zA-Z]*/y;
+
+  function tokenizeC(code, spec, depth = 0) {
+    const S = langSets(spec), out = [], n = code.length;
+    let i = 0, plain = "", prevWord = "", lineStart = true;
+    const flush = () => { if (plain) { out.push(["", plain]); plain = ""; } };
+    const tok = (cls, a, b) => { flush(); out.push([cls, code.slice(a, b)]); };
+    const prevSig = (k) => { k--; while (k >= 0 && (code[k] === " " || code[k] === "\t")) k--; return k >= 0 ? code[k] : ""; };
+    const nextSig = (k) => { while (k < n && (code[k] === " " || code[k] === "\t")) k++; return code[k] || ""; };
+    const readString = (qi) => {
+      const q = code[qi];
+      if (spec.tq && code.startsWith(q.repeat(3), qi)) {
+        const e = code.indexOf(q.repeat(3), qi + 3);
+        return e < 0 ? n : e + 3;
+      }
+      const raw = spec.rawq && q === "'", multi = q === "`" || spec.mq;
+      let j = qi + 1;
+      while (j < n) {
+        const c = code[j];
+        if (c === "\\" && !raw) { j += 2; continue; }
+        if (c === q) return j + 1;
+        if (c === "\n" && !multi) return j;
+        j++;
+      }
+      return n;
+    };
+    const emitTemplate = (qi) => {
+      let j = qi + 1, segStart = qi;
+      while (j < n) {
+        const c = code[j];
+        if (c === "\\") { j += 2; continue; }
+        if (c === "`") { j++; break; }
+        if (c === "$" && code[j + 1] === "{") {
+          flush();
+          if (j > segStart) out.push(["syn-str", code.slice(segStart, j)]);
+          let d = 1, k = j + 2;
+          while (k < n && d > 0) { if (code[k] === "{") d++; else if (code[k] === "}") d--; k++; }
+          out.push(["syn-key", "${"]);
+          const innerEnd = d === 0 ? k - 1 : k;
+          for (const t of tokenizeC(code.slice(j + 2, innerEnd), spec, depth + 1)) out.push(t);
+          if (d === 0) out.push(["syn-key", "}"]);
+          segStart = k; j = k;
+          continue;
+        }
+        j++;
+      }
+      const end = Math.min(j, n);
+      if (end > segStart) { flush(); out.push(["syn-str", code.slice(segStart, end)]); }
+      return end;
+    };
+    while (i < n) {
+      const ch = code[i];
+      if (ch === "\n") { plain += ch; i++; lineStart = true; continue; }
+      if (ch === " " || ch === "\t" || ch === "\r") { plain += ch; i++; continue; }
+      const pw = prevWord;
+      prevWord = "";
+      const wasLineStart = lineStart;
+      lineStart = false;
+      if (spec.pre && ch === "#" && wasLineStart) {
+        const m = /#\s*[a-zA-Z_]+/y; m.lastIndex = i;
+        const r = m.exec(code);
+        if (r) {
+          tok("syn-ctrl", i, i + r[0].length);
+          i += r[0].length;
+          if (/include|import/.test(r[0])) {
+            let k = i; while (code[k] === " " || code[k] === "\t") k++;
+            if (code[k] === "<") { const e = code.indexOf(">", k), nl = code.indexOf("\n", k); if (e > 0 && (nl < 0 || e < nl)) { plain += code.slice(i, k); tok("syn-str", k, e + 1); i = e + 1; } }
+          }
+          continue;
+        }
+      }
+      if (spec.php) {
+        if (code.startsWith("<?", i)) { const m = /<\?(?:php|=)?/y; m.lastIndex = i; const r = m.exec(code); tok("syn-meta", i, i + r[0].length); i += r[0].length; continue; }
+        if (code.startsWith("?>", i)) { tok("syn-meta", i, i + 2); i += 2; continue; }
+      }
+      if (spec.bc && code.startsWith(spec.bc[0], i)) {
+        let e = code.indexOf(spec.bc[1], i + spec.bc[0].length);
+        e = e < 0 ? n : e + spec.bc[1].length;
+        tok("syn-comment", i, e); i = e; continue;
+      }
+      const lc = spec.lc && spec.lc.find((m) => code.startsWith(m, i));
+      if (lc && !(spec.ruby && false)) {
+        let e = code.indexOf("\n", i); if (e < 0) e = n;
+        tok("syn-comment", i, e); i = e; continue;
+      }
+      if (ch === "`" && spec.tpl && depth < 4) { i = emitTemplate(i); continue; }
+      if (spec.q.includes(ch)) {
+        if (spec.rust && ch === "'") {
+          const c = /'(?:\\.|[^\\'\n])'/y; c.lastIndex = i;
+          const r = c.exec(code);
+          if (r) { tok("syn-str", i, i + r[0].length); i += r[0].length; continue; }
+          const l = /'[A-Za-z_]\w*/y; l.lastIndex = i;
+          const lr = l.exec(code);
+          if (lr) { tok("syn-type", i, i + lr[0].length); i += lr[0].length; continue; }
+        }
+        const e = readString(i);
+        tok("syn-str", i, e); i = e; continue;
+      }
+      if (spec.regex && ch === "/" && code[i + 1] !== "/" && code[i + 1] !== "*") {
+        const ps = prevSig(i);
+        let ok = ps === "" || "(,=:[!&|?{};+-*%<>~^".includes(ps);
+        if (!ok && ps !== "") { const w = /([A-Za-z]+)\s*$/.exec(code.slice(Math.max(0, i - 12), i)); ok = !!w && /^(return|typeof|case|in|of|delete|void|throw|yield|await)$/.test(w[1]); }
+        if (ok) {
+          let j = i + 1, inCls = false, closed = false;
+          while (j < n) {
+            const c = code[j];
+            if (c === "\\") { j += 2; continue; }
+            if (c === "\n") break;
+            if (c === "[") inCls = true; else if (c === "]") inCls = false;
+            else if (c === "/" && !inCls) { j++; closed = true; break; }
+            j++;
+          }
+          if (closed) { while (/[a-z]/.test(code[j] || "")) j++; tok("syn-regex", i, j); i = j; continue; }
+        }
+      }
+      if (/[0-9]/.test(ch) || (ch === "." && /[0-9]/.test(code[i + 1] || ""))) {
+        const before = code[i - 1] || "";
+        if (!/[\w$]/.test(before)) {
+          RE_NUM.lastIndex = i;
+          const r = RE_NUM.exec(code);
+          if (r && r[0]) { tok("syn-number", i, i + r[0].length); i += r[0].length; continue; }
+        }
+      }
+      if (spec.at && ch === "@" && /[A-Za-z_]/.test(code[i + 1] || "")) {
+        const m = /@[A-Za-z_][\w.]*/y; m.lastIndex = i;
+        const r = m.exec(code); tok("syn-meta", i, i + r[0].length); i += r[0].length; continue;
+      }
+      if (spec.dollar && ch === "$") {
+        const m = /\$(?:[A-Za-z_]\w*|\{[^}\n]*\}|[0-9@#?*!$-])/y; m.lastIndex = i;
+        const r = m.exec(code);
+        if (r) { tok("syn-var", i, i + r[0].length); i += r[0].length; continue; }
+      }
+      if (spec.ruby && (ch === "@" || (ch === ":" && code[i - 1] !== ":" && /[A-Za-z_]/.test(code[i + 1] || "")))) {
+        const m = ch === "@" ? /@@?[A-Za-z_]\w*/y : /:[A-Za-z_]\w*[?!]?/y; m.lastIndex = i;
+        const r = m.exec(code);
+        if (r) { tok(ch === "@" ? "syn-var" : "syn-const", i, i + r[0].length); i += r[0].length; continue; }
+      }
+      if (spec.jsx && ch === "<" && /^<\/?[A-Za-z]/.test(code.slice(i, i + 3))) {
+        const ps = prevSig(i);
+        if (!/[\w$)\]]/.test(ps)) {
+          const m = /<\/?[A-Za-z][\w.]*/y; m.lastIndex = i;
+          const r = m.exec(code);
+          plain += code[i]; if (code[i + 1] === "/") plain += "/";
+          const nameStart = i + (code[i + 1] === "/" ? 2 : 1);
+          tok("syn-tag", nameStart, i + r[0].length); i += r[0].length; continue;
+        }
+      }
+      RE_ID.lastIndex = i;
+      const m = RE_ID.exec(code);
+      if (m) {
+        const w = m[0], lower = spec.ci ? w.toLowerCase() : w;
+        if (spec.pystr && /^[rRbBfFuU]{1,2}$/.test(w) && (code[i + w.length] === '"' || code[i + w.length] === "'")) {
+          const e = readString(i + w.length); tok("syn-str", i, e); i = e; continue;
+        }
+        const after = nextSig(i + w.length);
+        let cls = "";
+        const isKw = S.kw.has(lower), isCtrl = S.ctrl.has(lower);
+        if (!spec.ci && DECL_FN.has(pw) && !isKw && !isCtrl) cls = "syn-func";
+        else if (!spec.ci && DECL_TYPE.has(pw) && !isKw && !isCtrl) cls = "syn-type";
+        else if (isKw) cls = "syn-key";
+        else if (isCtrl) cls = "syn-ctrl";
+        else if (S.types.has(spec.ci ? lower : w)) cls = "syn-type";
+        else if (spec.ci && after === "(") cls = "syn-func";
+        else if (spec.ci) cls = "syn-var";
+        else if (prevSig(i) === "." ) cls = after === "(" ? "syn-func" : "syn-prop";
+        else if (after === "(") cls = "syn-func";
+        else if (w.length > 1 && /^[A-Z][A-Z0-9_]+$/.test(w)) cls = "syn-const";
+        else if (spec.cap && /^[A-Z]/.test(w)) cls = "syn-type";
+        else cls = "syn-var";
+        tok(cls, i, i + w.length);
+        if (DECL_FN.has(w) || DECL_TYPE.has(w)) prevWord = w;
+        i += w.length;
+        continue;
+      }
+      plain += ch; i++;
     }
-    return out + esc(line.slice(last));
+    flush();
+    return out;
   }
 
-  function codeWindow(code, language = "javascript", filename = "", postId = "") {
-    const lang = String(language || "javascript").toLowerCase();
-    const extMap = {
-      javascript: "js",
-      js: "js",
-      jsx: "jsx",
-      typescript: "ts",
-      ts: "ts",
-      tsx: "tsx",
-      python: "py",
-      py: "py",
-      html: "html",
-      css: "css",
-      json: "json",
-      java: "java",
-      php: "php",
-      go: "go",
-      rust: "rs",
-      rs: "rs",
-      c: "c",
-      cpp: "cpp",
-      csharp: "cs",
-      sql: "sql",
-      bash: "sh",
-      shell: "sh",
+  function tokenizeJson(code) {
+    const out = [], n = code.length;
+    let i = 0, plain = "";
+    const flush = () => { if (plain) { out.push(["", plain]); plain = ""; } };
+    while (i < n) {
+      const ch = code[i];
+      if (ch === '"') {
+        let j = i + 1;
+        while (j < n && code[j] !== '"' && code[j] !== "\n") { if (code[j] === "\\") j++; j++; }
+        j = Math.min(j + 1, n);
+        let k = j; while (code[k] === " " || code[k] === "\t") k++;
+        flush(); out.push([code[k] === ":" ? "syn-prop" : "syn-str", code.slice(i, j)]); i = j; continue;
+      }
+      if (code.startsWith("//", i)) { let e = code.indexOf("\n", i); if (e < 0) e = n; flush(); out.push(["syn-comment", code.slice(i, e)]); i = e; continue; }
+      const num = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y; num.lastIndex = i;
+      const nm = /[-\d]/.test(ch) ? num.exec(code) : null;
+      if (nm) { flush(); out.push(["syn-number", nm[0]]); i += nm[0].length; continue; }
+      const kw = /(?:true|false|null)\b/y; kw.lastIndex = i;
+      const km = /[tfn]/.test(ch) ? kw.exec(code) : null;
+      if (km) { flush(); out.push(["syn-key", km[0]]); i += km[0].length; continue; }
+      plain += ch; i++;
+    }
+    flush();
+    return out;
+  }
+
+  function tokenizeYaml(code) {
+    const out = [], lines = code.split("\n");
+    let block = -1;
+    const value = (v) => {
+      if (!v) return;
+      const cm = /^(.*?)(\s+#.*)$/.exec(v), body = cm ? cm[1] : v, tail = cm ? cm[2] : "";
+      const lead = /^\s*/.exec(body)[0], t = body.slice(lead.length);
+      if (lead) out.push(["", lead]);
+      if (t) {
+        if (/^["']/.test(t)) out.push(["syn-str", t]);
+        else if (/^(true|false|null|yes|no|on|off|~)$/i.test(t)) out.push(["syn-key", t]);
+        else if (/^-?\d+(\.\d+)?$/.test(t)) out.push(["syn-number", t]);
+        else if (/^[&*]\w+/.test(t)) out.push(["syn-func", t]);
+        else if (/^[|>][+-]?$/.test(t)) out.push(["", t]);
+        else out.push(["syn-str", t]);
+      }
+      if (tail) out.push(["syn-comment", tail]);
     };
-    const file = filename || `snippet.${extMap[lang] || "txt"}`;
-    const raw = String(code || "")
-      .replace(/\r\n?/g, "\n")
-      .split("\n")
-      .slice(0, 180);
-    return `<section class="vscode-window" aria-label="مقطع كود ${esc(file)}"><div class="vs-head"><span class="vs-dots"><i></i><i></i><i></i></span><div class="vs-tab"><span class="vs-file-icon">◆</span>${esc(file)}</div><span class="vs-lang">${esc(lang)}</span>${postId ? `<button class="vs-copy" data-action="copy-code" data-id="${esc(postId)}">نسخ الكود</button>` : ""}</div><div class="vs-code">${raw.map((line, i) => `<div class="vs-line"><span class="vs-no">${i + 1}</span><span class="vs-src">${highlightCodeLine(line, lang) || "&nbsp;"}</span></div>`).join("")}</div></section>`;
+    lines.forEach((line, idx) => {
+      if (idx > 0) out.push(["", "\n"]);
+      const ind = /^\s*/.exec(line)[0].length;
+      if (block >= 0) {
+        if (line.trim() === "" || ind > block) { out.push(["syn-str", line]); return; }
+        block = -1;
+      }
+      const cm = /^(\s*)(#.*)$/.exec(line);
+      if (cm) { if (cm[1]) out.push(["", cm[1]]); out.push(["syn-comment", cm[2]]); return; }
+      const km = /^(\s*(?:-\s+)*)("[^"]*"|'[^']*'|[^\s#:'"-][^#:]*?)(\s*:)(?=\s|$)(.*)$/.exec(line);
+      if (km) {
+        if (km[1]) out.push(["", km[1]]);
+        out.push(["syn-prop", km[2]]); out.push(["", km[3]]);
+        value(km[4]);
+        if (/^\s*[|>][+-]?\s*$/.test(km[4])) block = ind;
+        return;
+      }
+      const lm = /^(\s*-\s+)(.*)$/.exec(line);
+      if (lm) { out.push(["", lm[1]]); value(lm[2]); return; }
+      value(line);
+    });
+    return out;
+  }
+
+  function tokenizeCss(code) {
+    const out = [], n = code.length, stack = [];
+    let i = 0, plain = "", ps = 0, inValue = false, declStart = true, paren = 0;
+    const flush = () => { if (plain) { out.push(["", plain]); plain = ""; } };
+    const tok = (cls, a, b) => { flush(); out.push([cls, code.slice(a, b)]); };
+    const mode = () => stack[stack.length - 1] || "rules";
+    const sticky = (re, at) => { re.lastIndex = at; return re.exec(code); };
+    while (i < n) {
+      const ch = code[i];
+      if (code.startsWith("/*", i)) { let e = code.indexOf("*/", i + 2); e = e < 0 ? n : e + 2; tok("syn-comment", i, e); i = e; continue; }
+      if (ch === '"' || ch === "'") {
+        let j = i + 1;
+        while (j < n && code[j] !== ch && code[j] !== "\n") { if (code[j] === "\\") j++; j++; }
+        j = Math.min(j + 1, n); tok("syn-str", i, j); i = j; continue;
+      }
+      if (ch === "{") {
+        const prelude = code.slice(ps, i).trim();
+        stack.push(/^@(media|supports|layer|container|keyframes|-webkit-keyframes|document)/i.test(prelude) ? "rules" : "decl");
+        plain += ch; i++; ps = i; inValue = false; declStart = true; paren = 0; continue;
+      }
+      if (ch === "}") { stack.pop(); plain += ch; i++; ps = i; inValue = false; declStart = true; continue; }
+      if (ch === ";") { plain += ch; i++; ps = i; inValue = false; declStart = true; paren = 0; continue; }
+      if (/\s/.test(ch)) { plain += ch; i++; continue; }
+      if (mode() === "rules") {
+        let m;
+        if (ch === "@" && (m = sticky(/@[\w-]+/y, i))) { tok("syn-ctrl", i, i + m[0].length); i += m[0].length; continue; }
+        if ((ch === "." || ch === "#") && (m = sticky(/[.#][\w-]+/y, i))) { tok("syn-sel", i, i + m[0].length); i += m[0].length; continue; }
+        if (ch === ":" && (m = sticky(/::?[\w-]+/y, i))) { tok("syn-sel", i, i + m[0].length); i += m[0].length; continue; }
+        if (ch === "[" ) { const e = code.indexOf("]", i); const end = e < 0 ? n : e + 1; tok("syn-prop", i, end); i = end; continue; }
+        if (ch === "(") paren++;
+        if (ch === ")") paren = Math.max(0, paren - 1);
+        if ((m = sticky(/-?\d*\.?\d+(?:px|em|rem|%|vh|vw|dvh|ch|s|ms|deg|fr|pt|x)?/y, i)) && m[0] && /[\d]/.test(ch) ) { tok("syn-number", i, i + m[0].length); i += m[0].length; continue; }
+        if ((m = sticky(/[A-Za-z-][\w-]*/y, i))) { tok(paren ? "syn-prop" : "syn-tag", i, i + m[0].length); i += m[0].length; continue; }
+        plain += ch; i++; continue;
+      }
+      // declarations
+      let m;
+      if (!inValue) {
+        if (declStart && (m = sticky(/-{0,2}[A-Za-z_][\w-]*(?=\s*:)/y, i))) { tok("syn-prop", i, i + m[0].length); i += m[0].length; declStart = false; continue; }
+        if (ch === ":") { plain += ch; i++; inValue = true; continue; }
+        plain += ch; i++; continue;
+      }
+      if (ch === "#" && (m = sticky(/#[0-9a-fA-F]{3,8}\b/y, i))) { tok("syn-number", i, i + m[0].length); i += m[0].length; continue; }
+      if (ch === "!" && (m = sticky(/!\s*important/y, i))) { tok("syn-key", i, i + m[0].length); i += m[0].length; continue; }
+      if ((m = sticky(/-?(?:\d+\.?\d*|\.\d+)(?:px|em|rem|%|vh|vw|vmin|vmax|dvh|svh|lvh|ch|ex|s|ms|deg|rad|turn|fr|pt|cm|mm|in|x|dppx)?/y, i)) && m[0] && /[\d.-]/.test(ch) && !/^-$/.test(m[0])) { tok("syn-number", i, i + m[0].length); i += m[0].length; continue; }
+      if ((m = sticky(/--[\w-]+/y, i))) { tok("syn-prop", i, i + m[0].length); i += m[0].length; continue; }
+      if ((m = sticky(/[A-Za-z_-][\w-]*/y, i))) {
+        const w = m[0], isFn = code[i + w.length] === "(";
+        tok(isFn ? "syn-func" : "syn-str", i, i + w.length); i += w.length; continue;
+      }
+      plain += ch; i++;
+    }
+    flush();
+    return out;
+  }
+
+  function tokenizeHtml(code) {
+    const out = [], n = code.length;
+    let i = 0, plain = "";
+    const flush = () => { if (plain) { out.push(["", plain]); plain = ""; } };
+    const tok = (cls, a, b) => { flush(); out.push([cls, code.slice(a, b)]); };
+    while (i < n) {
+      if (code.startsWith("<!--", i)) { let e = code.indexOf("-->", i + 4); e = e < 0 ? n : e + 3; tok("syn-comment", i, e); i = e; continue; }
+      if (code[i] === "<" && /^<!doctype/i.test(code.slice(i, i + 9))) { let e = code.indexOf(">", i); e = e < 0 ? n : e + 1; tok("syn-meta", i, e); i = e; continue; }
+      const tm = code[i] === "<" ? /<(\/?)([A-Za-z][\w:-]*)/y : null;
+      if (tm) { tm.lastIndex = i; }
+      const tr = tm ? tm.exec(code) : null;
+      if (tr) {
+        tok("syn-punc", i, i + 1 + tr[1].length);
+        const nameStart = i + 1 + tr[1].length;
+        tok("syn-tag", nameStart, i + tr[0].length);
+        i += tr[0].length;
+        while (i < n && code[i] !== ">") {
+          const c = code[i];
+          if (/\s/.test(c)) { plain += c; i++; continue; }
+          if (c === "/") { tok("syn-punc", i, i + 1); i++; continue; }
+          if (c === "=") { tok("syn-punc", i, i + 1); i++; continue; }
+          if (c === '"' || c === "'") { let j = code.indexOf(c, i + 1); j = j < 0 ? n : j + 1; tok("syn-str", i, j); i = j; continue; }
+          const am = /[^\s=>/"']+/y; am.lastIndex = i;
+          const ar = am.exec(code);
+          if (!ar) { plain += c; i++; continue; }
+          const afterEq = /\s*=/y; afterEq.lastIndex = i + ar[0].length;
+          if (afterEq.test(code)) tok("syn-prop", i, i + ar[0].length);
+          else if (code[i - 1] === "=" ) tok("syn-str", i, i + ar[0].length);
+          else tok("syn-prop", i, i + ar[0].length);
+          i += ar[0].length;
+        }
+        if (i < n) { tok("syn-punc", i, i + 1); i++; }
+        const name = tr[2].toLowerCase();
+        if (!tr[1] && (name === "script" || name === "style")) {
+          const close = code.toLowerCase().indexOf(`</${name}`, i);
+          const end = close < 0 ? n : close;
+          flush();
+          const inner = code.slice(i, end);
+          for (const t of name === "script" ? tokenizeC(inner, LANGS.javascript) : tokenizeCss(inner)) out.push(t);
+          i = end;
+        }
+        continue;
+      }
+      plain += code[i]; i++;
+    }
+    flush();
+    return out;
+  }
+
+  function tokensToLines(tokens) {
+    const lines = [];
+    let cur = "";
+    for (const [cls, text] of tokens) {
+      const parts = text.split("\n");
+      parts.forEach((part, idx) => {
+        if (idx > 0) { lines.push(cur); cur = ""; }
+        if (part) cur += cls ? `<span class="${cls}">${esc(part)}</span>` : esc(part);
+      });
+    }
+    lines.push(cur);
+    return lines;
+  }
+
+  /* Returns one HTML string per source line (multi-line comments/strings keep their colour on every line). */
+  function highlightToLines(code, lang) {
+    const text = String(code || "").replace(/\r\n?/g, "\n");
+    const spec = langSpec(lang);
+    if (spec.kind === "text" || text.length > 200000) return text.split("\n").map(esc);
+    try {
+      const tokens =
+        spec.kind === "html" ? tokenizeHtml(text)
+        : spec.kind === "css" ? tokenizeCss(text)
+        : spec.kind === "json" ? tokenizeJson(text)
+        : spec.kind === "yaml" ? tokenizeYaml(text)
+        : tokenizeC(text, spec);
+      return tokensToLines(tokens);
+    } catch (error) {
+      return text.split("\n").map(esc);
+    }
+  }
+
+  /* ---------- Video links: YouTube and archive.org ---------- */
+  const YT_ID = /^[A-Za-z0-9_-]{11}$/;
+  const ARCHIVE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+  const isValidVideoId = (provider, id) =>
+    provider === "youtube" ? YT_ID.test(String(id || "")) : provider === "archive" ? ARCHIVE_ID.test(String(id || "")) : false;
+  const safeVideo = (p) => {
+    const provider = String(p?.videoProvider || ""), id = String(p?.videoId || "");
+    return isValidVideoId(provider, id) ? { provider, id } : null;
+  };
+  const videoWatchUrl = (provider, id) =>
+    provider === "youtube" ? `https://www.youtube.com/watch?v=${id}` : `https://archive.org/details/${encodeURIComponent(id)}`;
+  const videoEmbedUrl = (provider, id, autoplay) =>
+    provider === "youtube"
+      ? `https://www.youtube-nocookie.com/embed/${id}?rel=0&modestbranding=1&playsinline=1${autoplay ? "&autoplay=1" : ""}`
+      : `https://archive.org/embed/${encodeURIComponent(id)}`;
+  const videoThumbUrl = (provider, id) =>
+    provider === "youtube" ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : `https://archive.org/services/img/${encodeURIComponent(id)}`;
+
+  function parseVideoUrl(input) {
+    let s = String(input || "").trim();
+    if (!s) return null;
+    if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
+    let u;
+    try { u = new URL(s); } catch { return null; }
+    const host = u.hostname.toLowerCase().replace(/^www\./, "").replace(/^m\./, "");
+    if (host === "youtu.be") {
+      const id = u.pathname.split("/")[1] || "";
+      return YT_ID.test(id) ? { provider: "youtube", id } : null;
+    }
+    if (host === "youtube.com" || host === "music.youtube.com" || host === "youtube-nocookie.com") {
+      if (u.pathname === "/watch") {
+        const id = u.searchParams.get("v") || "";
+        return YT_ID.test(id) ? { provider: "youtube", id } : null;
+      }
+      const m = u.pathname.match(/^\/(?:embed|shorts|live|v)\/([A-Za-z0-9_-]{11})(?:[/?]|$)/);
+      return m ? { provider: "youtube", id: m[1] } : null;
+    }
+    if (host === "archive.org") {
+      const m = u.pathname.match(/^\/(?:details|embed|download)\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})(?:[/?]|$)/);
+      return m ? { provider: "archive", id: m[1] } : null;
+    }
+    return null;
+  }
+
+  async function fetchWithTimeout(url, ms = 9000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetch(url, { signal: controller.signal, credentials: "omit", referrerPolicy: "no-referrer" });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  function imageLoads(url, ms = 7000) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const timer = setTimeout(() => resolve(false), ms);
+      img.onload = () => { clearTimeout(timer); resolve(img.naturalWidth > 120); };
+      img.onerror = () => { clearTimeout(timer); resolve(false); };
+      img.referrerPolicy = "no-referrer";
+      img.src = url;
+    });
+  }
+
+  /* Checks that the video exists and may be embedded. Resolves { ok, title?, reason?, soft? } and never throws. */
+  async function verifyVideo(provider, id) {
+    if (!isValidVideoId(provider, id)) return { ok: false, reason: "رابط الفيديو غير صالح." };
+    if (provider === "youtube") {
+      try {
+        const res = await fetchWithTimeout(`https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}&format=json`);
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          return { ok: true, title: String(data.title || "").slice(0, 140) };
+        }
+        if (res.status === 401 || res.status === 403) return { ok: false, reason: "صاحب الفيديو لا يسمح بتضمينه خارج يوتيوب." };
+        if (res.status === 404 || res.status === 400) return { ok: false, reason: "الفيديو غير موجود، أو هو خاص أو محذوف." };
+        return { ok: false, reason: "تعذر التحقق من الفيديو الآن. حاول مرة أخرى." };
+      } catch {
+        // The oEmbed endpoint may be unreachable (network/CORS): fall back to checking the public thumbnail.
+        const exists = await imageLoads(videoThumbUrl("youtube", id));
+        return exists ? { ok: true, title: "", soft: true } : { ok: false, reason: "تعذر الوصول إلى الفيديو؛ تأكد من الرابط ومن اتصالك بالإنترنت." };
+      }
+    }
+    try {
+      const res = await fetchWithTimeout(`https://archive.org/metadata/${encodeURIComponent(id)}`);
+      if (!res.ok) return { ok: false, reason: "تعذر الوصول إلى أرشيف الإنترنت الآن. حاول مرة أخرى." };
+      const data = await res.json();
+      const meta = data && data.metadata;
+      if (!meta || !Object.keys(meta).length) return { ok: false, reason: "هذا العنصر غير موجود في أرشيف الإنترنت." };
+      if (data.is_dark || String(meta["access-restricted-item"]) === "true") return { ok: false, reason: "هذا العنصر مقيّد أو غير متاح للعرض." };
+      if (String(meta.mediatype) !== "movies") return { ok: false, reason: "هذا الرابط ليس فيديو. اختر عنصراً من نوع (Movies) في أرشيف الإنترنت." };
+      const playable = (data.files || []).some((f) => /\.(mp4|webm|ogv|mkv|m4v|mov|avi|mpg|mpeg)$/i.test(String(f.name || "")) || /MPEG4|h\.264|Ogg Video|WebM|Matroska/i.test(String(f.format || "")));
+      if (!playable) return { ok: false, reason: "لا يحتوي هذا العنصر على ملف فيديو قابل للتشغيل." };
+      const title = Array.isArray(meta.title) ? meta.title[0] : meta.title;
+      return { ok: true, title: String(title || "").slice(0, 140) };
+    } catch {
+      return { ok: false, reason: "تعذر التحقق من الفيديو؛ تأكد من اتصالك بالإنترنت ثم أعد المحاولة." };
+    }
+  }
+
+  const PLAY_ICON = '<svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.52.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14z" fill="currentColor"/></svg>';
+  /* Lazy "facade": a thumbnail + play button. The real player is only created when the visitor presses play. */
+  function videoBlock(p) {
+    const v = safeVideo(p);
+    if (!v) return "";
+    const name = v.provider === "youtube" ? "YouTube" : "Internet Archive";
+    return `<figure class="video-card" data-provider="${v.provider}"><div class="video-frame"><button type="button" class="video-play" data-action="play-video" data-provider="${v.provider}" data-vid="${esc(v.id)}" aria-label="${esc(localizeText("تشغيل الفيديو"))}"><img src="${esc(videoThumbUrl(v.provider, v.id))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"><span class="video-badge">${name}</span><span class="video-btn">${PLAY_ICON}</span></button></div><figcaption class="video-meta"><span class="video-src"><i></i>${name}</span><a class="video-open" href="${esc(videoWatchUrl(v.provider, v.id))}" target="_blank" rel="noopener noreferrer nofollow">${esc(localizeText(v.provider === "youtube" ? "المشاهدة على يوتيوب" : "المشاهدة على أرشيف الإنترنت"))} ↗</a></figcaption></figure>`;
+  }
+  function playVideo(button) {
+    const provider = button.dataset.provider, id = button.dataset.vid;
+    if (!isValidVideoId(provider, id)) return;
+    const frame = button.closest(".video-frame");
+    if (!frame) return;
+    const iframe = document.createElement("iframe");
+    iframe.src = videoEmbedUrl(provider, id, true);
+    iframe.title = localizeText("مشغل الفيديو");
+    iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture; fullscreen";
+    iframe.allowFullscreen = true;
+    iframe.referrerPolicy = "strict-origin-when-cross-origin";
+    frame.replaceChildren(iframe);
+  }
+  document.addEventListener("error", (e) => {
+    if (e.target?.matches?.(".video-play img")) e.target.remove();
+  }, true);
+
+  /* ---------- Composer: video field ---------- */
+  let videoCheckSeq = 0, videoCheckTimer = 0, videoLastReason = "";
+  function setVideoStatus(state, text) {
+    const el = document.querySelector("#videoStatus");
+    if (!el) return;
+    el.className = `video-status ${state}`;
+    el.textContent = text ? localizeText(text) : "";
+    videoLastReason = state === "error" ? text : "";
+  }
+  function setVideoValue(provider, id) {
+    const p = document.querySelector("#videoProvider"), i = document.querySelector("#videoId");
+    if (p) p.value = provider || "";
+    if (i) i.value = id || "";
+  }
+  async function checkVideoInput() {
+    const input = document.querySelector("#publishVideo");
+    if (!input) return null;
+    const preview = document.querySelector("#videoPreview");
+    const raw = input.value.trim();
+    const seq = ++videoCheckSeq;
+    setVideoValue("", "");
+    if (!raw) {
+      setVideoStatus("", "");
+      if (preview) preview.innerHTML = "";
+      syncMediaExclusivity();
+      return null;
+    }
+    const parsed = parseVideoUrl(raw);
+    if (!parsed) {
+      setVideoStatus("error", "الرابط غير مدعوم. استخدم رابط فيديو من يوتيوب أو من archive.org.");
+      if (preview) preview.innerHTML = "";
+      return null;
+    }
+    setVideoStatus("loading", "جارٍ التحقق من أن الفيديو يعمل…");
+    const res = await verifyVideo(parsed.provider, parsed.id);
+    if (seq !== videoCheckSeq) return null;
+    if (!res.ok) {
+      setVideoStatus("error", res.reason);
+      if (preview) preview.innerHTML = "";
+      syncMediaExclusivity();
+      return null;
+    }
+    setVideoValue(parsed.provider, parsed.id);
+    setVideoStatus("ok", `✓ الفيديو يعمل${res.title ? ` — ${res.title}` : ""}`);
+    if (preview) preview.innerHTML = videoBlock({ videoProvider: parsed.provider, videoId: parsed.id });
+    syncMediaExclusivity();
+    return parsed;
+  }
+  function scheduleVideoCheck() {
+    clearTimeout(videoCheckTimer);
+    videoCheckTimer = setTimeout(checkVideoInput, 450);
+  }
+  function clearVideoField() {
+    clearTimeout(videoCheckTimer);
+    videoCheckSeq++;
+    const input = document.querySelector("#publishVideo");
+    if (input) input.value = "";
+    setVideoValue("", "");
+    setVideoStatus("", "");
+    const preview = document.querySelector("#videoPreview");
+    if (preview) preview.innerHTML = "";
+    syncMediaExclusivity();
+  }
+  function prefillVideoFields(p) {
+    const v = safeVideo(p);
+    const input = document.querySelector("#publishVideo");
+    if (!input || !v) return;
+    input.value = videoWatchUrl(v.provider, v.id);
+    checkVideoInput();
+  }
+
+  /* A post can hold a video OR code/a file — never both. */
+  function syncMediaExclusivity() {
+    const input = document.querySelector("#publishVideo");
+    if (!input) return;
+    const hasCode = !!(document.querySelector("#publishCode")?.value.trim()) || !!selectedCodeFileBase64;
+    const hasVideo = !!document.querySelector("#videoId")?.value;
+    input.disabled = hasCode;
+    const clear = document.querySelector("#videoClear");
+    if (clear) clear.hidden = !input.value.trim() || hasCode;
+    const lock = document.querySelector("#videoLock");
+    if (lock) {
+      lock.hidden = !hasCode;
+      lock.textContent = localizeText("أزل الكود أو الملف أولاً لتتمكن من إضافة فيديو.");
+    }
+    document.querySelector("#videoAttach")?.classList.toggle("locked", hasCode);
+    document.querySelector("#codeAttach")?.classList.toggle("locked", hasVideo);
+    refreshCodeAttach();
+  }
+
+  /* ---------- Composer: code attachment card ---------- */
+  const fmtBytes = (b) => (b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(2)} MB`);
+  function refreshCodeAttach() {
+    const host = document.querySelector("#codeAttachBody");
+    if (!host) return;
+    const T = localizeText;
+    const codeEl = document.querySelector("#publishCode");
+    const code = (codeEl?.value || "").trim();
+    const lang = document.querySelector("#publishLanguage")?.value || "javascript";
+    const fname = document.querySelector("#codeFilename")?.value.trim() || "";
+    const hasVideo = !!document.querySelector("#videoId")?.value;
+    const article = document.querySelector("#publishKind")?.value === "مقالة";
+    if (hasVideo) {
+      host.innerHTML = `<div class="code-locked">${esc(T("تمت إضافة فيديو، لذلك لا يمكن إرفاق كود أو ملف. أزل الفيديو إن أردت إضافة كود."))}</div>`;
+      return;
+    }
+    if (code) {
+      const lines = code.split("\n").length;
+      host.innerHTML = `${codeWindow(code, lang, fname)}<div class="code-actions"><button type="button" class="btn small primary" data-action="open-code-studio">✎ ${esc(T("تعديل في المحرر"))}</button><button type="button" class="btn small danger ghost" data-action="remove-code">${esc(T("إزالة الكود"))}</button><span class="muted">${lines} ${language === "en" ? "lines" : "سطر"} · ${fmtBytes(utf8Bytes(code))} · ${esc(langSpec(lang).label)}</span></div>`;
+      return;
+    }
+    host.innerHTML = `<div class="code-empty"><span class="code-empty-ic">&lt;/&gt;</span><div class="code-empty-t"><b>${esc(T("أضف مقطع كود"))}</b><span>${esc(T("اكتب أو الصق الكود في محرر مخصص بتلوين حسب لغة البرمجة."))}</span></div><div class="code-empty-a"><button type="button" class="btn small primary" data-action="open-code-studio">✎ ${esc(T("كتابة الكود"))}</button>${article ? "" : `<label class="btn small" id="codeFileLabel" for="codeFile">📄 ${esc(T("رفع ملف"))}</label>`}</div></div>`;
+  }
+  function removeCode() {
+    const code = document.querySelector("#publishCode");
+    if (code) code.value = "";
+    clearSelectedCodeFile(false);
+    refreshCodeAttach();
+    syncMediaExclusivity();
+  }
+
+  /* ---------- Code studio: a full-screen, VS Code-style editor ---------- */
+  let studio = null;
+  function studioClose(apply) {
+    if (!studio) return;
+    const { root, ta, getLang, original, startLang, viewportHandler } = studio;
+    if (apply) {
+      const text = ta.value.replace(/\r\n?/g, "\n").replace(/\s+$/g, "");
+      const kind = document.querySelector("#publishKind")?.value || "نقاش";
+      const cap = kind === "نقاش" ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES;
+      if (utf8Bytes(text) > cap) {
+        toast(language === "en" ? `The code is too large (limit ${fmtBytes(cap)}).` : `الكود كبير جداً (الحد ${fmtBytes(cap)}).`, "error");
+        return;
+      }
+      const codeEl = document.querySelector("#publishCode"), langEl = document.querySelector("#publishLanguage");
+      if (codeEl) codeEl.value = text;
+      if (langEl) langEl.value = getLang();
+      if (selectedCodeFileBase64 && text !== selectedCodeFileText) clearSelectedCodeFile(false);
+    } else if (ta.value !== original || getLang() !== startLang) {
+      if (!window.confirm(localizeText("تجاهل التعديلات على الكود؟"))) return;
+    }
+    if (window.visualViewport && viewportHandler) {
+      window.visualViewport.removeEventListener("resize", viewportHandler);
+      window.visualViewport.removeEventListener("scroll", viewportHandler);
+    }
+    root.remove();
+    document.documentElement.classList.remove("studio-open");
+    studio = null;
+    refreshCodeAttach();
+    syncMediaExclusivity();
+  }
+
+  function openCodeStudio() {
+    if (studio) return;
+    if (document.querySelector("#videoId")?.value) {
+      toast("تمت إضافة فيديو؛ أزله أولاً لتتمكن من إضافة كود.", "error");
+      return;
+    }
+    const T = localizeText;
+    const codeEl = document.querySelector("#publishCode"), langEl = document.querySelector("#publishLanguage");
+    if (!codeEl || !langEl) return;
+    const kind = document.querySelector("#publishKind")?.value || "نقاش";
+    const cap = kind === "نقاش" ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES;
+    const article = kind === "مقالة";
+    const startText = codeEl.value, startLang = normLang(langEl.value);
+    let lang = startLang;
+    const root = document.createElement("div");
+    root.className = "code-studio";
+    root.id = "codeStudio";
+    root.setAttribute("role", "dialog");
+    root.setAttribute("aria-modal", "true");
+    root.setAttribute("aria-label", T("محرر الكود"));
+    const chips = LANG_ORDER.map((k) => `<button type="button" class="cs-chip${k === lang ? " active" : ""}" data-lang="${k}" role="tab" aria-selected="${k === lang}">${esc(LANGS[k].label)}</button>`).join("");
+    const keys = [["⇥", "\t", "Tab"], ["{ }", "{}"], ["( )", "()"], ["[ ]", "[]"], ["< >", "<>"], ['" "', '""'], ["' '", "''"], ["`", "`"], [";", ";"], [":", ":"], ["=", "="], ["=>", "=> "], ["/", "/"], ["\\", "\\"], ["$", "$"], ["#", "#"]]
+      .map(([label, ins, aria]) => `<button type="button" class="cs-key" data-ins="${esc(ins)}"${aria ? ` aria-label="${aria}"` : ""}>${esc(label)}</button>`).join("");
+    root.innerHTML = `<div class="cs-bar" dir="rtl"><div class="cs-bar-start"><span class="vs-dots"><i></i><i></i><i></i></span><span class="cs-title">${esc(T("محرر الكود"))}</span></div><div class="cs-tab" dir="ltr"><span class="vs-file-icon">◆</span><span id="csFile"></span></div><div class="cs-bar-end">${article ? "" : `<label class="cs-btn" for="codeFile">📄 ${esc(T("فتح ملف"))}</label>`}<button type="button" class="cs-btn" data-cs="cancel">${esc(T("إلغاء"))}</button><button type="button" class="cs-btn primary" data-cs="apply">${esc(T("إرفاق الكود"))}</button></div></div><div class="cs-langs" dir="rtl" role="tablist" aria-label="${esc(T("لغة البرمجة"))}">${chips}</div><div class="cs-main" dir="ltr"><pre class="cs-gutter" aria-hidden="true"></pre><div class="cs-stage"><pre class="cs-hl" aria-hidden="true"><code></code></pre><textarea class="cs-ta" id="csInput" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="${esc(T("اكتب الكود هنا"))}" placeholder="${esc(T("اكتب أو الصق الكود هنا…"))}"></textarea></div></div><div class="cs-keys" dir="ltr" aria-label="${esc(T("اختصارات الكتابة"))}">${keys}</div><div class="cs-status" dir="rtl"><span id="csPos">Ln 1, Col 1</span><span id="csIndent"></span><span>UTF-8</span><span id="csLang"></span><span class="cs-size" id="csSize"></span></div>`;
+    document.body.appendChild(root);
+    document.documentElement.classList.add("studio-open");
+
+    const ta = root.querySelector("#csInput"), hl = root.querySelector(".cs-hl code"), hlPre = root.querySelector(".cs-hl"), gutter = root.querySelector(".cs-gutter");
+    ta.value = startText;
+    const unit = () => " ".repeat(LANGS[lang].indent || 2);
+    let raf = 0;
+    const paint = () => {
+      raf = 0;
+      const text = ta.value;
+      const count = text.split("\n").length;
+      let nums = "";
+      for (let i = 1; i <= count; i++) nums += (i > 1 ? "\n" : "") + i;
+      gutter.textContent = nums;
+      gutter.style.minWidth = `${String(count).length + 2}ch`;
+      hl.innerHTML = highlightToLines(text, lang).join("\n") + "\n";
+      const bytes = utf8Bytes(text);
+      const size = root.querySelector("#csSize");
+      size.textContent = `${fmtBytes(bytes)} / ${fmtBytes(cap)}`;
+      size.classList.toggle("over", bytes > cap);
+      hlPre.scrollTop = ta.scrollTop; hlPre.scrollLeft = ta.scrollLeft; gutter.scrollTop = ta.scrollTop;
+    };
+    const schedulePaint = () => { if (!raf) raf = requestAnimationFrame(paint); };
+    const pos = () => {
+      const before = ta.value.slice(0, ta.selectionStart).split("\n");
+      root.querySelector("#csPos").textContent = `Ln ${before.length}, Col ${before[before.length - 1].length + 1}`;
+    };
+    const meta = () => {
+      const fileLabel = selectedCodeFileName && lang === startLang ? selectedCodeFileName : codeFileName(lang);
+      root.querySelector("#csFile").textContent = fileLabel;
+      root.querySelector("#csLang").textContent = LANGS[lang].label;
+      root.querySelector("#csIndent").textContent = `${language === "en" ? "Spaces" : "مسافات"}: ${LANGS[lang].indent || 2}`;
+      root.querySelectorAll(".cs-chip").forEach((c) => { const on = c.dataset.lang === lang; c.classList.toggle("active", on); c.setAttribute("aria-selected", String(on)); });
+    };
+    const insert = (text) => {
+      ta.focus();
+      if (!document.execCommand || !document.execCommand("insertText", false, text)) {
+        const s = ta.selectionStart;
+        ta.setRangeText(text, s, ta.selectionEnd, "end");
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    };
+    const PAIRS = { "(": ")", "[": "]", "{": "}", '"': '"', "'": "'", "`": "`" };
+    const wordChar = /[\w$]/;
+    const insertPair = (open) => {
+      const close = PAIRS[open], s = ta.selectionStart, e = ta.selectionEnd;
+      if (e > s) { const sel = ta.value.slice(s, e); insert(open + sel + close); ta.setSelectionRange(s + 1, s + 1 + sel.length); return; }
+      insert(open + close);
+      ta.setSelectionRange(s + 1, s + 1);
+    };
+    const lineRange = () => {
+      const v = ta.value, s = v.lastIndexOf("\n", ta.selectionStart - 1) + 1;
+      let e = v.indexOf("\n", ta.selectionEnd); if (e < 0) e = v.length;
+      return [s, e];
+    };
+    const reindent = (outdent) => {
+      const [s, e] = lineRange();
+      const block = ta.value.slice(s, e), u = unit();
+      const changed = block.split("\n").map((line) => (outdent ? (line.startsWith(u) ? line.slice(u.length) : line.replace(/^\t| {1,3}/, "")) : (line ? u + line : line))).join("\n");
+      const selStart = ta.selectionStart, selEnd = ta.selectionEnd;
+      ta.setSelectionRange(s, e);
+      insert(changed);
+      const delta = changed.length - block.length, firstDelta = (changed.split("\n")[0].length - block.split("\n")[0].length);
+      ta.setSelectionRange(Math.max(s, selStart + firstDelta), selEnd + delta);
+    };
+
+    ta.addEventListener("input", () => { schedulePaint(); pos(); });
+    ta.addEventListener("scroll", () => { hlPre.scrollTop = ta.scrollTop; hlPre.scrollLeft = ta.scrollLeft; gutter.scrollTop = ta.scrollTop; });
+    ta.addEventListener("keyup", pos);
+    ta.addEventListener("click", pos);
+    ta.addEventListener("keydown", (e) => {
+      if (e.isComposing) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key === "Tab" && !mod) {
+        e.preventDefault();
+        if (ta.value.slice(ta.selectionStart, ta.selectionEnd).includes("\n") || e.shiftKey) reindent(e.shiftKey);
+        else insert(unit());
+        return;
+      }
+      if (e.key === "Enter" && !mod && !e.shiftKey) {
+        const v = ta.value, s = ta.selectionStart, e2 = ta.selectionEnd;
+        const ls = v.lastIndexOf("\n", s - 1) + 1, line = v.slice(ls, s);
+        const base = /^[ \t]*/.exec(line)[0];
+        const before = v[s - 1] || "", after = v[e2] || "";
+        const opener = "{[(".includes(before) || (langSpec(lang).kind === "c" && lang === "python" && before === ":");
+        e.preventDefault();
+        if (opener && "}])".includes(after) && "{[(".indexOf(before) === "}])".indexOf(after) && before !== ":") {
+          insert(`\n${base}${unit()}\n${base}`);
+          const p = s + 1 + base.length + unit().length;
+          ta.setSelectionRange(p, p);
+        } else insert(`\n${base}${opener ? unit() : ""}`);
+        return;
+      }
+      if (!mod && !e.altKey) {
+        const k = e.key, s = ta.selectionStart, v = ta.value, next = v[s] || "", prev = v[s - 1] || "";
+        if (PAIRS[k] !== undefined) {
+          const quote = k === '"' || k === "'" || k === "`";
+          if (quote && next === k && ta.selectionStart === ta.selectionEnd) { e.preventDefault(); ta.setSelectionRange(s + 1, s + 1); return; }
+          if (quote && wordChar.test(prev) && ta.selectionStart === ta.selectionEnd) return;
+          if (ta.selectionStart !== ta.selectionEnd || !next || /[\s)\]}>,;:]/.test(next)) { e.preventDefault(); insertPair(k); return; }
+        }
+        if ((k === ")" || k === "]" || k === "}") && next === k && ta.selectionStart === ta.selectionEnd) { e.preventDefault(); ta.setSelectionRange(s + 1, s + 1); return; }
+        if ((k === ")" || k === "]" || k === "}") && ta.selectionStart === ta.selectionEnd) {
+          const lineStart = v.lastIndexOf("\n", s - 1) + 1, lead = v.slice(lineStart, s);
+          if (lead && /^[ \t]+$/.test(lead)) {
+            e.preventDefault();
+            const u = unit();
+            ta.setSelectionRange(s - (lead.endsWith(u) ? u.length : 1), s);
+            insert(k);
+            return;
+          }
+        }
+        if (k === "Backspace" && ta.selectionStart === ta.selectionEnd && PAIRS[prev] !== undefined && PAIRS[prev] === next) {
+          e.preventDefault(); ta.setSelectionRange(s - 1, s + 1); insert(""); return;
+        }
+      }
+    });
+    root.addEventListener("click", (e) => {
+      const chip = e.target.closest(".cs-chip");
+      if (chip) { lang = normLang(chip.dataset.lang); meta(); schedulePaint(); ta.focus(); return; }
+      const key = e.target.closest(".cs-key");
+      if (key) {
+        const ins = key.dataset.ins;
+        if (ins === "\t") insert(unit());
+        else if (ins.length === 2 && PAIRS[ins[0]] === ins[1]) insertPair(ins[0]);
+        else insert(ins);
+        return;
+      }
+      const act = e.target.closest("[data-cs]")?.dataset.cs;
+      if (act === "apply") studioClose(true);
+      if (act === "cancel") studioClose(false);
+    });
+    /* Keep the editor above the on-screen keyboard on phones. */
+    const vv = window.visualViewport;
+    const viewportHandler = vv ? () => { root.style.height = `${vv.height}px`; root.style.top = `${vv.offsetTop}px`; } : null;
+    if (vv) { vv.addEventListener("resize", viewportHandler); vv.addEventListener("scroll", viewportHandler); viewportHandler(); }
+    studio = { root, ta, getLang: () => lang, original: startText, startLang, viewportHandler, reload: () => { ta.value = codeEl.value; if (selectedCodeFileName) { const ext = (selectedCodeFileName.split(".").pop() || "").toLowerCase(); const hit = LANG_ORDER.find((k) => LANGS[k].ext === ext); if (hit) lang = hit; } meta(); schedulePaint(); pos(); } };
+    meta(); paint(); pos();
+    setTimeout(() => ta.focus(), 30);
+  }
+
+  /* >>> CODEEX_MEDIA_END */
+
+  function codeWindow(code, language = "javascript", filename = "", postId = "") {
+    const key = normLang(language), spec = LANGS[key];
+    const file = filename || `snippet.${spec.ext}`;
+    const lines = highlightToLines(String(code || "").split("\n").slice(0, 180).join("\n"), key);
+    return `<section class="vscode-window" aria-label="مقطع كود ${esc(file)}"><div class="vs-head"><span class="vs-dots"><i></i><i></i><i></i></span><div class="vs-tab"><span class="vs-file-icon">◆</span>${esc(file)}</div><span class="vs-lang">${esc(spec.label)}</span>${postId ? `<button class="vs-copy" data-action="copy-code" data-id="${esc(postId)}">نسخ الكود</button>` : ""}</div><div class="vs-code">${lines.map((line, i) => `<div class="vs-line"><span class="vs-no">${i + 1}</span><span class="vs-src">${line || "&nbsp;"}</span></div>`).join("")}</div></section>`;
   }
 
   function renderPostTextWithLinks(value) {
@@ -1973,7 +2804,7 @@
     const user = currentUser();
     const liked = (p.likedBy || []).includes(user?.uid || "guest");
     const saved = Store.saved().includes(p.id);
-    return `<article class="panel post" data-post="${esc(p.id)}"><div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent(author)}</span><div class="post-ident"><strong>${profileLink(p.uid, author.name || p.name)}</strong> <span class="kind-pill ${p.kind === "سؤال" ? "question" : p.kind === "مقالة" ? "article" : ""}">${esc(p.kind || "نقاش")}</span><div class="post-meta" dir="rtl">@${esc(author.handle || p.handle || "member")} · ${timeAgo(p.createdAt || Date.now())}</div></div><button class="post-menu" data-action="post-menu" data-id="${esc(p.id)}" title="المزيد">${icon("dots")}</button></div>${p.title ? `<h3 class="post-title">${esc(p.title)}</h3>` : ""}${postTextPreview(p)}${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((t) => `<button class="tag" data-action="tag" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div><div class="post-footer"><button class="post-action like ${liked ? "active" : ""}" data-action="like" data-id="${esc(p.id)}">${icon("heart")}<span>${Number(p.likes || 0)}</span></button><button class="post-action" data-action="comment" data-id="${esc(p.id)}">${icon("comment")}<span>${(p.comments || []).length}</span></button><button class="post-action ${saved ? "active" : ""}" data-action="save" data-id="${esc(p.id)}">${icon("bookmark")}<span>${saved ? "محفوظ" : "حفظ"}</span></button><button class="post-action" data-action="share" data-id="${esc(p.id)}">${icon("share")}<span>مشاركة</span></button><button class="post-action more" data-action="expand" data-id="${esc(p.id)}">عرض المزيد ${icon("arrow")}</button></div></article>`;
+    return `<article class="panel post" data-post="${esc(p.id)}"><div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent(author)}</span><div class="post-ident"><strong>${profileLink(p.uid, author.name || p.name)}</strong> <span class="kind-pill ${p.kind === "سؤال" ? "question" : p.kind === "مقالة" ? "article" : ""}">${esc(p.kind || "نقاش")}</span><div class="post-meta" dir="rtl">@${esc(author.handle || p.handle || "member")} · ${timeAgo(p.createdAt || Date.now())}</div></div><button class="post-menu" data-action="post-menu" data-id="${esc(p.id)}" title="المزيد">${icon("dots")}</button></div>${p.title ? `<h3 class="post-title">${esc(p.title)}</h3>` : ""}${postTextPreview(p)}${videoBlock(p)}${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((t) => `<button class="tag" data-action="tag" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div><div class="post-footer"><button class="post-action like ${liked ? "active" : ""}" data-action="like" data-id="${esc(p.id)}">${icon("heart")}<span>${Number(p.likes || 0)}</span></button><button class="post-action" data-action="comment" data-id="${esc(p.id)}">${icon("comment")}<span>${(p.comments || []).length}</span></button><button class="post-action ${saved ? "active" : ""}" data-action="save" data-id="${esc(p.id)}">${icon("bookmark")}<span>${saved ? "محفوظ" : "حفظ"}</span></button><button class="post-action" data-action="share" data-id="${esc(p.id)}">${icon("share")}<span>مشاركة</span></button><button class="post-action more" data-action="expand" data-id="${esc(p.id)}">عرض المزيد ${icon("arrow")}</button></div></article>`;
   }
 
   function findPost(id) {
@@ -2225,6 +3056,7 @@
         : (language === "en" ? `Project/resource code: up to 3 MB; one uploaded file every 7 days; 10 minutes between posts.` : "المشروع/المورد: كود حتى 3 ميجابايت، ملف واحد كل 7 أيام، وفاصل 10 دقائق بين المنشورات.");
     if (article && selectedCodeFileBase64) clearSelectedCodeFile(true);
     else if (selectedCodeFileBytes > 0 && selectedCodeFileBytes > (discussion ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES)) clearSelectedCodeFile(true);
+    syncMediaExclusivity();
   }
 
   function updatePublishVisibilityUI() {
@@ -2247,7 +3079,7 @@
       return `${pageHeader("المشاركة في Codeex", "سجّل الدخول أولاً لتتمكن من النشر.", "")}<div class="panel empty-state"><b>تحتاج إلى حساب للمشاركة</b><button class="btn primary" data-auth="register">إنشاء حساب</button></div>`;
     return `${pageHeader("إنشاء مشاركة", "شارك فكرة أو مقالة أو مشروعاً مع المطورين العرب.", "")}<section class="panel"><form class="form-grid" id="publishForm"><label>نوع المشاركة<select class="field" id="publishKind"><option>نقاش</option><option>مقالة</option><option>مورد</option><option>مشروع</option></select></label><label>مكان النشر<select class="field" id="publishGroup"><option value="">المجتمع العام — يظهر المنشور في الرئيسية</option>${groups
       .filter((g) => g.visibility === "public" || isGroupMember(g))
-      .map((g) => `<option value="${esc(g.id)}">${esc(g.name)} — ${g.visibility === "private" ? "خاص" : "عام"}</option>`).join("")}</select></label><label>ظهور المنشور<select class="field" id="publishVisibility" aria-describedby="publishVisibilityHint"><option value="members">أعضاء Codeex فقط</option><option value="public">عام (سيظهر في كل محركات البحث ولا يتطلب تسجيل دخول)</option></select><small class="muted" id="publishVisibilityHint">خاص بأعضاء Codeex المسجلين؛ لا يظهر في صفحات المشاركة العامة أو محركات البحث.</small></label><label>العنوان (اختياري للنقاش)<input class="field" id="publishTitle" maxlength="140" placeholder="عنوان واضح ومفيد"></label><label>التفاصيل<textarea class="field" id="publishText" maxlength="307200" placeholder="اكتب ما تريد مشاركته..." required></textarea></label><div><strong style="display:block;font-size:12px;color:#67758b">مقطع كود (اختياري)</strong><div style="display:flex;gap:8px;align-items:center;margin:5px 0 8px"><select class="field" id="publishLanguage" style="margin:0;max-width:180px"><option value="javascript">JavaScript</option><option value="typescript">TypeScript</option><option value="python">Python</option><option value="html">HTML</option><option value="css">CSS</option><option value="json">JSON</option><option value="java">Java</option><option value="php">PHP</option><option value="go">Go</option><option value="rust">Rust</option><option value="sql">SQL</option><option value="bash">Bash</option></select><label class="btn small" id="codeFileLabel" for="codeFile">اختيار ملف كود</label><input id="codeFile" type="file" accept=".js,.jsx,.ts,.tsx,.py,.html,.css,.json,.java,.php,.go,.rs,.c,.cpp,.cs,.sql,.sh,.txt" hidden></div><input id="codeFilename" type="hidden"><textarea class="code-editor" id="publishCode" maxlength="3145728" placeholder="الصق الكود هنا أو اختر ملفاً من جهازك"></textarea><small class="muted" id="publishPolicyHint"></small><br><small class="muted"></small></div><label>وسوم مفصولة بفاصلة<input class="field" id="publishTags" placeholder="React, JavaScript"></label><div class="modal-actions"><button class="btn" type="button" data-page="home">إلغاء</button><button class="btn primary" type="submit">نشر المشاركة</button></div></form></section>`;
+      .map((g) => `<option value="${esc(g.id)}">${esc(g.name)} — ${g.visibility === "private" ? "خاص" : "عام"}</option>`).join("")}</select></label><label>ظهور المنشور<select class="field" id="publishVisibility" aria-describedby="publishVisibilityHint"><option value="members">أعضاء Codeex فقط</option><option value="public">عام (سيظهر في كل محركات البحث ولا يتطلب تسجيل دخول)</option></select><small class="muted" id="publishVisibilityHint">خاص بأعضاء Codeex المسجلين؛ لا يظهر في صفحات المشاركة العامة أو محركات البحث.</small></label><label>العنوان (اختياري للنقاش)<input class="field" id="publishTitle" maxlength="140" placeholder="عنوان واضح ومفيد"></label><label>التفاصيل<textarea class="field" id="publishText" maxlength="307200" placeholder="اكتب ما تريد مشاركته..." required></textarea></label><div class="video-attach" id="videoAttach"><strong class="attach-title">فيديو (اختياري)</strong><div class="video-input-row"><input class="field" id="publishVideo" type="text" inputmode="url" dir="ltr" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://www.youtube.com/watch?v=… | https://archive.org/details/…"><button type="button" class="btn small ghost" id="videoClear" data-action="clear-video" hidden>إزالة الفيديو</button></div><div class="video-status" id="videoStatus" role="status" aria-live="polite"></div><div id="videoPreview"></div><small class="field-hint" id="videoLock" hidden></small><small class="field-hint">يُدعم يوتيوب وأرشيف الإنترنت (archive.org). نتحقق من أن الفيديو يعمل قبل النشر، وإذا أضفت فيديو فلا يمكن إرفاق كود أو ملف معه.</small><input type="hidden" id="videoProvider"><input type="hidden" id="videoId"></div><div class="code-attach" id="codeAttach"><strong class="attach-title">مقطع كود (اختياري)</strong><div id="codeAttachBody"></div><input id="codeFile" type="file" accept=".js,.jsx,.ts,.tsx,.py,.html,.css,.json,.java,.php,.go,.rs,.c,.cpp,.cs,.sql,.sh,.txt" hidden><textarea id="publishCode" hidden maxlength="3145728"></textarea><input id="publishLanguage" type="hidden" value="javascript"><input id="codeFilename" type="hidden"><small class="muted" id="publishPolicyHint"></small></div><label>وسوم مفصولة بفاصلة<input class="field" id="publishTags" placeholder="React, JavaScript"></label><div class="modal-actions"><button class="btn" type="button" data-page="home">إلغاء</button><button class="btn primary" type="submit">نشر المشاركة</button></div></form></section>`;
   }
 
   function renderSearch() {
@@ -2408,6 +3240,10 @@
     const act = e.target.closest("[data-action]");
     if (!act) return;
     const action = act.dataset.action;
+    if (action === "play-video") { playVideo(act); return; }
+    if (action === "open-code-studio") { openCodeStudio(); return; }
+    if (action === "remove-code") { removeCode(); return; }
+    if (action === "clear-video") { clearVideoField(); return; }
     if (action === "toggle-post-text") {
       const card = act.closest("[data-post]");
       const text = card?.querySelector(".post-text");
@@ -2669,7 +3505,7 @@
       if (!p) return;
       openModal(
         p.title || "تفاصيل المشاركة",
-        `<div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent({ ...p, ...(publicProfiles[p.uid] || {}) })}</span><div class="post-ident"><strong>${profileLink(p.uid, personName(p))}</strong><div class="post-meta">${timeAgo(p.createdAt)}</div></div></div><p class="post-text">${renderPostTextWithLinks(p.text)}</p>${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((x) => `<span class="tag">#${esc(x)}</span>`).join("")}</div><div class="divider"></div><p class="muted">${(p.comments || []).length} تعليق · ${p.likes || 0} إعجاب</p>`,
+        `<div class="post-header"><span class="avatar ${esc(p.tone || "blue")}"${p.uid ? ` data-action="open-profile" data-uid="${esc(p.uid)}"` : ""}>${avatarContent({ ...p, ...(publicProfiles[p.uid] || {}) })}</span><div class="post-ident"><strong>${profileLink(p.uid, personName(p))}</strong><div class="post-meta">${timeAgo(p.createdAt)}</div></div></div><p class="post-text">${renderPostTextWithLinks(p.text)}</p>${videoBlock(p)}${p.code ? codeWindow(p.code, p.codeLanguage, p.fileName, p.id) : ""}<div class="post-tags">${(p.tags || []).map((x) => `<span class="tag">#${esc(x)}</span>`).join("")}</div><div class="divider"></div><p class="muted">${(p.comments || []).length} تعليق · ${p.likes || 0} إعجاب</p>`,
       );
       return;
     }
@@ -2704,6 +3540,9 @@
         v("#publishCode", p.code);
         v("#codeFilename", p.fileName);
         v("#publishTags", (p.tags || []).join(", "));
+        prefillVideoFields(p);
+        refreshCodeAttach();
+        syncMediaExclusivity();
         const submit = document.querySelector("#publishForm button[type=submit]");
         if (submit) submit.textContent = "حفظ التعديلات";
       }, 0);
@@ -2889,6 +3728,8 @@
         codeLanguage: document.querySelector("#publishLanguage").value,
         fileName: document.querySelector("#codeFilename").value.trim(),
         fileSize: selectedCodeFileBytes,
+        videoProvider: "",
+        videoId: "",
         tags: document
           .querySelector("#publishTags")
           .value.split(/[,،]/)
@@ -2902,6 +3743,17 @@
         createdAt: existing?.createdAt || Date.now(),
       };
       try {
+        const typedVideo = document.querySelector("#publishVideo")?.value.trim();
+        if (typedVideo) {
+          toast("جارٍ التحقق من الفيديو…");
+          const checked = await checkVideoInput();
+          if (!checked) throw new AppError(videoLastReason || "تحقق من رابط الفيديو قبل النشر.");
+          draft.videoProvider = checked.provider;
+          draft.videoId = checked.id;
+          draft.code = "";
+          draft.fileName = "";
+          draft.fileSize = 0;
+        }
         validatePublishDraft(draft, existing);
         if (!(await savePost(draft))) return;
         clearSelectedCodeFile(false);
@@ -3053,6 +3905,7 @@
   });
 
   document.querySelector("#pageView").addEventListener("input", (e) => {
+    if (e.target.id === "publishVideo") { scheduleVideoCheck(); return; }
     if (e.target.id !== "publishCode" || !selectedCodeFileBase64) return;
     if (e.target.value !== selectedCodeFileText) {
       clearSelectedCodeFile(false);
@@ -3062,7 +3915,11 @@
     }
   });
 
+  document.querySelector("#pageView").addEventListener("paste", (e) => {
+    if (e.target.id === "publishVideo") setTimeout(checkVideoInput, 0);
+  });
   document.querySelector("#pageView").addEventListener("change", async (e) => {
+    if (e.target.id === "publishVideo") { clearTimeout(videoCheckTimer); checkVideoInput(); return; }
     if (e.target.id === "publishKind") {
       updateComposePolicyUI();
       return;
@@ -3106,6 +3963,9 @@
         selectedCodeFileText = content;
         const select = document.querySelector("#publishLanguage");
         if (langs[ext]) select.value = langs[ext];
+        if (studio) studio.reload();
+        refreshCodeAttach();
+        syncMediaExclusivity();
         toast(language === "en" ? `${file.name} loaded (${file.size} bytes).` : `تم تحميل ${file.name} (${file.size} بايت).`);
         input.value = "";
       } catch {
@@ -3395,6 +4255,46 @@
     "تم نسخ رابط المشاركة": "Share link copied",
     "تسجيل الدخول إلى Codeex": "Sign in to Codeex",
     "إنشاء حساب في Codeex": "Create your Codeex account",
+    "فيديو (اختياري)": "Video (optional)",
+    "يُدعم يوتيوب وأرشيف الإنترنت (archive.org). نتحقق من أن الفيديو يعمل قبل النشر، وإذا أضفت فيديو فلا يمكن إرفاق كود أو ملف معه.": "YouTube and Internet Archive (archive.org) are supported. We check that the video works before publishing; a post with a video cannot include code or a file.",
+    "أزل الكود أو الملف أولاً لتتمكن من إضافة فيديو.": "Remove the code or file first to add a video.",
+    "الرابط غير مدعوم. استخدم رابط فيديو من يوتيوب أو من archive.org.": "Unsupported link. Use a YouTube or archive.org video link.",
+    "جارٍ التحقق من أن الفيديو يعمل…": "Checking that the video works…",
+    "جارٍ التحقق من الفيديو…": "Checking the video…",
+    "تحقق من رابط الفيديو قبل النشر.": "Check the video link before publishing.",
+    "رابط الفيديو غير صالح.": "The video link is not valid.",
+    "صاحب الفيديو لا يسمح بتضمينه خارج يوتيوب.": "The video owner does not allow embedding outside YouTube.",
+    "الفيديو غير موجود، أو هو خاص أو محذوف.": "The video does not exist, or it is private or deleted.",
+    "تعذر التحقق من الفيديو الآن. حاول مرة أخرى.": "Could not check the video right now. Try again.",
+    "تعذر الوصول إلى الفيديو؛ تأكد من الرابط ومن اتصالك بالإنترنت.": "Could not reach the video; check the link and your connection.",
+    "تعذر الوصول إلى أرشيف الإنترنت الآن. حاول مرة أخرى.": "Could not reach the Internet Archive right now. Try again.",
+    "هذا العنصر غير موجود في أرشيف الإنترنت.": "This item does not exist on the Internet Archive.",
+    "هذا العنصر مقيّد أو غير متاح للعرض.": "This item is restricted or unavailable for viewing.",
+    "هذا الرابط ليس فيديو. اختر عنصراً من نوع (Movies) في أرشيف الإنترنت.": "This link is not a video. Choose a Movies item on the Internet Archive.",
+    "لا يحتوي هذا العنصر على ملف فيديو قابل للتشغيل.": "This item has no playable video file.",
+    "تعذر التحقق من الفيديو؛ تأكد من اتصالك بالإنترنت ثم أعد المحاولة.": "Could not check the video; check your connection and try again.",
+    "تشغيل الفيديو": "Play video",
+    "مشغل الفيديو": "Video player",
+    "المشاهدة على يوتيوب": "Watch on YouTube",
+    "المشاهدة على أرشيف الإنترنت": "Watch on the Internet Archive",
+    "تمت إضافة فيديو، لذلك لا يمكن إرفاق كود أو ملف. أزل الفيديو إن أردت إضافة كود.": "A video was added, so code or files cannot be attached. Remove the video to add code.",
+    "تمت إضافة فيديو؛ أزله أولاً لتتمكن من إضافة كود.": "A video was added; remove it first to add code.",
+    "تعديل في المحرر": "Edit in editor",
+    "إزالة الكود": "Remove code",
+    "أضف مقطع كود": "Add a code snippet",
+    "اكتب أو الصق الكود في محرر مخصص بتلوين حسب لغة البرمجة.": "Write or paste your code in a dedicated editor with per-language syntax colouring.",
+    "كتابة الكود": "Write code",
+    "رفع ملف": "Upload a file",
+    "محرر الكود": "Code editor",
+    "فتح ملف": "Open file",
+    "إلغاء": "Cancel",
+    "إرفاق الكود": "Attach code",
+    "لغة البرمجة": "Programming language",
+    "اكتب الكود هنا": "Write code here",
+    "اكتب أو الصق الكود هنا…": "Write or paste your code here…",
+    "اختصارات الكتابة": "Typing shortcuts",
+    "إزالة الفيديو": "Remove video",
+    "تجاهل التعديلات على الكود؟": "Discard the changes to the code?",
   };
 
   Object.assign(EN, {
