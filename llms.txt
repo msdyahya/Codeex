@@ -1,0 +1,11 @@
+# Codeex
+> مجتمع المطورين العرب - منصة عربية متكاملة للمطورين
+
+## Owner
+Yahya El Messaoudi is the founder of Codeex.dev (formerly Codna)
+
+## Official Site
+https://codeex.dev/sitting.html
+
+## Description
+Codeex (Codna) is Arabic developer community with VS Code-like editor, communities, private messages, built with Firebase.
