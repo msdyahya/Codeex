@@ -50,6 +50,22 @@ pre{margin:0;padding:18px;overflow:auto;color:#e6edf7;font:14px/1.75 ui-monospac
 .actions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
 .links{display:flex;gap:6px 18px;justify-content:center;flex-wrap:wrap;margin-top:26px;color:var(--muted);font-size:14px}
 .links a{text-decoration:none}.links a:hover{color:var(--blue)}
+.video-card{margin:26px 0 0;overflow:hidden;border:1px solid var(--line);border-radius:18px;background:var(--paper);box-shadow:0 10px 30px #1b2b4212}
+.video-frame{position:relative;aspect-ratio:16/9;background:#0b1220}
+.video-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.video-play{position:absolute;inset:0;display:block;width:100%;padding:0;border:0;color:#fff;cursor:pointer;overflow:hidden;background:radial-gradient(ellipse at 30% 20%,#27407a,#0b1220)}
+.video-play img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.92;transition:transform .35s ease,opacity .2s}
+.video-play:hover img{transform:scale(1.035);opacity:1}
+.video-play:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,#0b122000 45%,#0b1220b8);pointer-events:none}
+.video-btn{position:absolute;top:50%;left:50%;z-index:2;display:grid;place-items:center;width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--violet));box-shadow:0 8px 28px #2864e866,0 0 0 8px #ffffff26;transform:translate(-50%,-50%);transition:transform .2s}
+.video-play:hover .video-btn{transform:translate(-50%,-50%) scale(1.08)}
+.video-play:focus-visible{outline:3px solid var(--blue);outline-offset:-3px}
+.video-badge{position:absolute;top:12px;inset-inline-start:12px;z-index:2;padding:3px 10px;border-radius:999px;background:#0b1220b3;color:#fff;font-size:11px;font-weight:700}
+.video-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;border-top:1px solid var(--line);background:var(--soft);color:var(--muted);font-size:13px}
+.video-src{display:inline-flex;align-items:center;gap:7px;font-weight:700;direction:ltr}.video-src i{width:8px;height:8px;border-radius:50%;background:#ff2d55}
+.video-card[data-provider=archive] .video-src i{background:#4c9ffe}
+.video-open{color:var(--blue);font-weight:700;text-decoration:none}.video-open:hover{text-decoration:underline}
+@media(prefers-reduced-motion:reduce){.video-play img,.video-btn{transition:none}}
 @media(max-width:520px){.body{font-size:17px}.cta{padding:16px}.btn{width:100%;text-align:center}}
 `;
 
@@ -171,6 +187,19 @@ function shareImage(post) {
   });
 }
 
+const VIDEO_ID = { youtube: /^[A-Za-z0-9_-]{11}$/, archive: /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/ };
+
+function videoHtml(post) {
+  const provider = plain(post.videoProvider), id = plain(post.videoId);
+  if (!VIDEO_ID[provider] || !VIDEO_ID[provider].test(id)) return "";
+  const name = provider === "youtube" ? "YouTube" : "Internet Archive";
+  const thumb = provider === "youtube" ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : `https://archive.org/services/img/${encodeURIComponent(id)}`;
+  const watch = provider === "youtube" ? `https://www.youtube.com/watch?v=${id}` : `https://archive.org/details/${encodeURIComponent(id)}`;
+  const label = provider === "youtube" ? "المشاهدة على يوتيوب" : "المشاهدة على أرشيف الإنترنت";
+  const icon = `<svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.52.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14z" fill="currentColor"/></svg>`;
+  return `<figure class="video-card" data-provider="${provider}"><div class="video-frame"><button type="button" class="video-play" data-provider="${provider}" data-vid="${htmlEscape(id)}" aria-label="تشغيل الفيديو"><img src="${htmlEscape(thumb)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"><span class="video-badge">${name}</span><span class="video-btn">${icon}</span></button></div><figcaption class="video-meta"><span class="video-src"><i></i>${name}</span><a class="video-open" href="${htmlEscape(watch)}" target="_blank" rel="noopener noreferrer nofollow">${label} ↗</a></figcaption></figure>`;
+}
+
 function postPage(post, id) {
   const title = postTitle(post);
   const description = postDescription(post);
@@ -203,12 +232,12 @@ ${published ? `<meta property="article:published_time" content="${published}">` 
   const tagList = tags.length
     ? `<div class="tags">${tags.map((tag) => `<span class="tag" dir="auto">#${htmlEscape(tag)}</span>`).join("")}</div>`
     : "";
-  const script = `<script>document.querySelectorAll(".copy").forEach(function(b){b.addEventListener("click",function(){var c=b.closest(".codebox").querySelector("code").innerText;var done=function(t){b.textContent=t;setTimeout(function(){b.textContent="نسخ"},1800)};if(navigator.clipboard){navigator.clipboard.writeText(c).then(function(){done("تم النسخ ✓")},function(){done("تعذر النسخ")})}else{done("تعذر النسخ")}})})</script>`;
+  const script = `<script>document.querySelectorAll(".video-play").forEach(function(b){b.addEventListener("click",function(){var p=b.dataset.provider,id=b.dataset.vid;var src=p==="youtube"?"https://www.youtube-nocookie.com/embed/"+id+"?rel=0&modestbranding=1&playsinline=1&autoplay=1":"https://archive.org/embed/"+encodeURIComponent(id);var f=document.createElement("iframe");f.src=src;f.title="مشغل الفيديو";f.allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture; fullscreen";f.allowFullscreen=true;f.referrerPolicy="strict-origin-when-cross-origin";b.parentNode.replaceChildren(f)})});document.querySelectorAll(".video-play img").forEach(function(i){i.addEventListener("error",function(){i.remove()})});document.querySelectorAll(".copy").forEach(function(b){b.addEventListener("click",function(){var c=b.closest(".codebox").querySelector("code").innerText;var done=function(t){b.textContent=t;setTimeout(function(){b.textContent="نسخ"},1800)};if(navigator.clipboard){navigator.clipboard.writeText(c).then(function(){done("تم النسخ ✓")},function(){done("تعذر النسخ")})}else{done("تعذر النسخ")}})})</script>`;
   const html = `${pageHead({ title, description, extra })}
 <body><main class="wrap"><header class="top">${BRAND}<span class="pill">منشور عام</span></header>
 <article class="card"><span class="kind">${htmlEscape(plain(post.kind) || "مشاركة")}</span><h1>${htmlEscape(title)}</h1>
 <div class="author"><span class="avatar" aria-hidden="true">${initial}</span><div class="who"><span class="name">${htmlEscape(author)}</span><div class="sub">${handle ? `<span class="handle">@${htmlEscape(handle)}</span>` : ""}${published ? `<time datetime="${published}">${htmlEscape(dateLabel)}</time>` : ""}</div></div></div>
-<div class="body">${htmlEscape(text)}</div>${codeBlock}${tagList}
+<div class="body">${htmlEscape(text)}</div>${videoHtml(post)}${codeBlock}${tagList}
 <div class="cta"><div><b>انضم إلى مجتمع Codeex</b><span>مجتمع المطورين العرب لمشاركة الأكواد والمعرفة.</span></div><a class="btn primary" href="${SITE}/">زيارة Codeex</a></div>
 </article><p class="foot">منشور عام — لا يلزم تسجيل الدخول لقراءته.</p></main>${script}</body></html>`;
   return new Response(html, { status: 200, headers: responseHeaders("text/html") });
