@@ -686,10 +686,11 @@
       : `You can publish again in ${min} minute(s). Editing remains available.`;
   }
 
-  const MAX_PROJECT_RESOURCE_BYTES = 3 * 1024 * 1024;
-  const MAX_DISCUSSION_BYTES = 300 * 1024;
+  const MAX_PROJECT_RESOURCE_BYTES = 2 * 1024 * 1024; // projects and resources
+  const MAX_DISCUSSION_BYTES = 1024 * 1024; // every other kind
   const PROJECT_RESOURCE_COOLDOWN_MS = 10 * 60 * 1000;
   const isProjectResourceKind = (kind) => ["مشروع", "مورد", "project", "resource"].includes(String(kind || ""));
+  const maxCodeBytes = (kind) => (isProjectResourceKind(kind) ? MAX_PROJECT_RESOURCE_BYTES : MAX_DISCUSSION_BYTES);
   const utf8Bytes = (value) => new TextEncoder().encode(String(value || "")).byteLength;
   const wordCount = (value) => String(value || "").trim().split(/\s+/u).filter(Boolean).length;
 
@@ -705,10 +706,10 @@
     const descriptionLines = String(p.text || "").split(/\r\n|\r|\n/).length;
     if (p.kind !== "مقالة" && p.kind !== "article" && descriptionLines > 500)
       throw new AppError(language === "en" ? "Descriptions cannot exceed 500 lines." : "لا يمكن أن يتجاوز الوصف 500 سطر، باستثناء المقالات.");
-    if (isDiscussion && utf8Bytes(`${p.title || ""}${p.text || ""}${p.code || ""}`) > MAX_DISCUSSION_BYTES)
-      throw new AppError(language === "en" ? "A discussion's text and code together cannot exceed 300 KB." : "لا يمكن أن يتجاوز مجموع نص النقاش والكود 300 كيلوبايت.");
+    if (!isProjectResourceKind(p.kind) && utf8Bytes(`${p.title || ""}${p.text || ""}${p.code || ""}`) > MAX_DISCUSSION_BYTES)
+      throw new AppError(language === "en" ? "The text and code together cannot exceed 1 MB." : "لا يمكن أن يتجاوز مجموع النص والكود 1 ميجابايت.");
     if (isProjectResourceKind(p.kind) && utf8Bytes(p.code || "") > MAX_PROJECT_RESOURCE_BYTES)
-      throw new AppError(language === "en" ? "Project/resource code cannot exceed 3 MB." : "لا يمكن أن يتجاوز كود المشروع أو المورد 3 ميجابايت.");
+      throw new AppError(language === "en" ? "Project/resource code cannot exceed 2 MB." : "لا يمكن أن يتجاوز كود المشروع أو المورد 2 ميجابايت.");
     if (isArticle && selectedCodeFileBase64)
       throw new AppError(language === "en" ? "Articles cannot include an uploaded file." : "لا يمكن إرفاق ملف بالمقالة.");
     if (p.videoId || p.videoProvider) {
@@ -1044,11 +1045,19 @@
     );
   }
 
+  let groupAdminMap = {};
+  /* The owner, an appointed group admin and the site admin can manage a group's members. */
+  const canManageGroup = (g) =>
+    !!activeUser && !!g && (g.ownerUid === activeUser.uid || groupAdminMap[g.id] === true || isAdminUid(activeUser.uid));
+  /* The site admin joins any group straight away: a private group behaves like a public one for him. */
+  const needsApproval = (g) => g.visibility === "private" && !isAdminUid(activeUser?.uid);
+
   function stopMembershipWatchers() {
     groupMemberUnsubs.forEach((fn) => fn());
     groupMemberUnsubs = [];
     groupMembersMap = {};
     groupMembershipOverrides = {};
+    groupAdminMap = {};
   }
 
   function syncMembershipWatchers() {
@@ -1094,6 +1103,14 @@
         };
       r.on("value", fn, onListenError);
       groupMemberUnsubs.push(() => r.off("value", fn));
+      const adminRef = database.ref(`groupAdmins/${g.id}/${activeUser.uid}`),
+        adminFn = (s) => {
+          const was = groupAdminMap[g.id] === true;
+          groupAdminMap[g.id] = s.val() === true;
+          if (was !== groupAdminMap[g.id] && (page === "groups" || page === "group-detail")) renderFrame();
+        };
+      adminRef.on("value", adminFn, () => {});
+      groupMemberUnsubs.push(() => adminRef.off("value", adminFn));
     }
   }
 
@@ -1208,6 +1225,93 @@
     }
   }
 
+  /* ---------- Follow requests (messaging opens only after a follow request is accepted) ---------- */
+  let followingSet = {}, followersSet = {}, incomingFollowReqs = {}, sentFollowReqs = {}, followUnsubs = [], mobileChat = false;
+  const isFollowing = (uid) => followingSet[uid] === true;
+  const isFollower = (uid) => followersSet[uid] === true;
+  const canMessage = (uid) => !!activeUser && !!uid && uid !== activeUser.uid && (isFollowing(uid) || isFollower(uid));
+  const connectionUids = () =>
+    [...new Set([...Object.keys(followingSet), ...Object.keys(followersSet)])].filter(
+      (id) => id !== activeUser?.uid && publicProfiles[id] && (followingSet[id] === true || followersSet[id] === true),
+    );
+  function stopFollowWatchers() {
+    followUnsubs.forEach((fn) => fn());
+    followUnsubs = [];
+  }
+  function startFollowWatchers(uid) {
+    stopFollowWatchers();
+    const watch = (path, set) => {
+      const r = database.ref(path);
+      const fn = (snap) => {
+        set(snap.val() || {});
+        if (["messages", "profile", "notifications"].includes(page) && !document.activeElement?.matches("input,textarea")) renderPage();
+      };
+      r.on("value", fn, onListenError);
+      followUnsubs.push(() => r.off("value", fn));
+    };
+    watch(`following/${uid}`, (v) => { followingSet = v; });
+    watch(`followers/${uid}`, (v) => { followersSet = v; });
+    watch(`followRequests/${uid}`, (v) => { incomingFollowReqs = v; });
+    watch(`followSent/${uid}`, (v) => { sentFollowReqs = v; });
+  }
+  async function followAction(action, uid) {
+    const me = activeUser;
+    if (!me || !uid || uid === me.uid) return;
+    if (!allowAction("follow", 700, true)) return;
+    const now = Date.now(), up = {}, en = language === "en", myName = me.name || (en ? "A member" : "عضو");
+    try {
+      if (action === "follow") {
+        if (isFollowing(uid) || sentFollowReqs[uid]) return;
+        up[`followRequests/${uid}/${me.uid}`] = { uid: me.uid, name: myName, requestedAt: now };
+        up[`followSent/${me.uid}/${uid}`] = { requestedAt: now };
+        await database.ref().update(up);
+        sentFollowReqs = { ...sentFollowReqs, [uid]: { requestedAt: now } };
+        toast("أُرسل طلب المتابعة. ستظهر المراسلة عند قبوله.");
+        addNotification(uid, { type: "follow_request", text: en ? `${myName} wants to follow you.` : `${myName} يريد متابعتك.` }).catch(() => {});
+      } else if (action === "cancel-follow" || action === "decline-follow") {
+        const asTarget = action === "decline-follow";
+        up[`followRequests/${asTarget ? me.uid : uid}/${asTarget ? uid : me.uid}`] = null;
+        up[`followSent/${asTarget ? uid : me.uid}/${asTarget ? me.uid : uid}`] = null;
+        await database.ref().update(up);
+        if (asTarget) { incomingFollowReqs = { ...incomingFollowReqs }; delete incomingFollowReqs[uid]; toast("رُفض طلب المتابعة"); }
+        else { sentFollowReqs = { ...sentFollowReqs }; delete sentFollowReqs[uid]; toast("أُلغي طلب المتابعة"); }
+      } else if (action === "accept-follow") {
+        if (!incomingFollowReqs[uid]) return;
+        up[`followers/${me.uid}/${uid}`] = true;
+        up[`following/${uid}/${me.uid}`] = true;
+        up[`followRequests/${me.uid}/${uid}`] = null;
+        up[`followSent/${uid}/${me.uid}`] = null;
+        await database.ref().update(up);
+        followersSet = { ...followersSet, [uid]: true };
+        incomingFollowReqs = { ...incomingFollowReqs }; delete incomingFollowReqs[uid];
+        toast("قبلت طلب المتابعة. يمكنكما الآن المراسلة.");
+        addNotification(uid, { type: "follow_accepted", text: en ? `${myName} accepted your follow request. You can now message each other.` : `${myName} قبل طلب متابعتك. يمكنكما الآن المراسلة.` }).catch(() => {});
+      } else if (action === "unfollow" || action === "remove-follower") {
+        const iFollow = action === "unfollow";
+        up[`followers/${iFollow ? uid : me.uid}/${iFollow ? me.uid : uid}`] = null;
+        up[`following/${iFollow ? me.uid : uid}/${iFollow ? uid : me.uid}`] = null;
+        await database.ref().update(up);
+        if (iFollow) { followingSet = { ...followingSet }; delete followingSet[uid]; toast("ألغيت متابعة هذا العضو"); }
+        else { followersSet = { ...followersSet }; delete followersSet[uid]; toast("أُزيل المتابع"); }
+      }
+      renderPage();
+    } catch (error) {
+      handleError(error);
+    }
+  }
+  function profileFollowActions(user) {
+    const uid = esc(user.uid);
+    const follow = isFollowing(user.uid)
+      ? `<button class="btn" data-action="unfollow" data-uid="${uid}">✓ تتابع هذا العضو</button>`
+      : sentFollowReqs[user.uid]
+        ? `<button class="btn soft" data-action="cancel-follow" data-uid="${uid}">طلب المتابعة قيد الانتظار · إلغاء</button>`
+        : incomingFollowReqs[user.uid]
+          ? `<button class="btn primary" data-action="accept-follow" data-uid="${uid}">قبول طلب المتابعة</button><button class="btn ghost" data-action="decline-follow" data-uid="${uid}">رفض طلب المتابعة</button>`
+          : `<button class="btn primary" data-action="follow" data-uid="${uid}">${icon("plus")} متابعة العضو</button>`;
+    const message = canMessage(user.uid) ? `<button class="btn" data-action="message-user" data-uid="${uid}">${icon("comment")} مراسلة</button>` : "";
+    return `<div class="profile-cover-actions">${follow}${message}<button class="btn" data-page="home">العودة</button></div>`;
+  }
+
   const NOTICE_TTL_MS = 6 * 24 * 60 * 60 * 1000;
   /* Read notifications are removed 6 days after they were read. Returns the ones that remain. */
   function pruneNotifications(uid, raw) {
@@ -1232,6 +1336,7 @@
 
   function syncUserState(uid) {
     stopUserWatchers();
+    startFollowWatchers(uid);
     watchUserPath(`users/${uid}/saved`, (v) => {
       savedIds = Object.keys(v).filter((k) => v[k] === true);
       if (!["compose", "messages", "settings"].includes(page)) renderPage();
@@ -1391,9 +1496,8 @@
 
   function maybeOpenChat() {
     if (page !== "messages" || !activeUser) return;
-    const first = Object.keys(publicProfiles).find((id) => id !== activeUser.uid);
-    const target =
-      activeConversation && publicProfiles[activeConversation] ? activeConversation : first;
+    const ids = connectionUids();
+    const target = activeConversation && ids.includes(activeConversation) ? activeConversation : ids[0];
     if (target && target !== activeConversation) subscribeConversation(target);
   }
 
@@ -1438,6 +1542,7 @@
     await r.set({ ...note, id: r.key, actorUid: activeUser.uid, read: false, time: Date.now() });
   }
 
+  let lastRenderedPage = "";
   const COMMENT_PAGE = 10;
   const MAX_COMMENTS_PER_USER = 2;
   let commentsLimit = COMMENT_PAGE;
@@ -1693,6 +1798,8 @@
         publicProfiles = {};
         rawGroupData = {};
         stopMembershipWatchers();
+        stopFollowWatchers();
+        followingSet = {}; followersSet = {}; incomingFollowReqs = {}; sentFollowReqs = {};
         groupRequestData = {};
         groupPendingStatus = {};
         groupRequestUnsubs.forEach((fn) => fn());
@@ -2379,7 +2486,7 @@
     }
   }
 
-  /* ---------- Video links: YouTube and archive.org ---------- */
+  /* ---------- Video links ---------- */
   const YT_ID = /^[A-Za-z0-9_-]{11}$/;
   const ARCHIVE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
   const isValidVideoId = (provider, id) =>
@@ -2388,8 +2495,6 @@
     const provider = String(p?.videoProvider || ""), id = String(p?.videoId || "");
     return isValidVideoId(provider, id) ? { provider, id } : null;
   };
-  const videoWatchUrl = (provider, id) =>
-    provider === "youtube" ? `https://www.youtube.com/watch?v=${id}` : `https://archive.org/details/${encodeURIComponent(id)}`;
   const videoEmbedUrl = (provider, id, autoplay) =>
     provider === "youtube"
       ? `https://www.youtube-nocookie.com/embed/${id}?rel=0&modestbranding=1&playsinline=1${autoplay ? "&autoplay=1" : ""}`
@@ -2453,7 +2558,7 @@
           const data = await res.json().catch(() => ({}));
           return { ok: true, title: String(data.title || "").slice(0, 140) };
         }
-        if (res.status === 401 || res.status === 403) return { ok: false, reason: "صاحب الفيديو لا يسمح بتضمينه خارج يوتيوب." };
+        if (res.status === 401 || res.status === 403) return { ok: false, reason: "صاحب الفيديو لا يسمح بتضمينه في المواقع الأخرى." };
         if (res.status === 404 || res.status === 400) return { ok: false, reason: "الفيديو غير موجود، أو هو خاص أو محذوف." };
         return { ok: false, reason: "تعذر التحقق من الفيديو الآن. حاول مرة أخرى." };
       } catch {
@@ -2464,12 +2569,12 @@
     }
     try {
       const res = await fetchWithTimeout(`https://archive.org/metadata/${encodeURIComponent(id)}`);
-      if (!res.ok) return { ok: false, reason: "تعذر الوصول إلى أرشيف الإنترنت الآن. حاول مرة أخرى." };
+      if (!res.ok) return { ok: false, reason: "تعذر الوصول إلى مصدر الفيديو الآن. حاول مرة أخرى." };
       const data = await res.json();
       const meta = data && data.metadata;
-      if (!meta || !Object.keys(meta).length) return { ok: false, reason: "هذا العنصر غير موجود في أرشيف الإنترنت." };
+      if (!meta || !Object.keys(meta).length) return { ok: false, reason: "هذا الفيديو غير موجود." };
       if (data.is_dark || String(meta["access-restricted-item"]) === "true") return { ok: false, reason: "هذا العنصر مقيّد أو غير متاح للعرض." };
-      if (String(meta.mediatype) !== "movies") return { ok: false, reason: "هذا الرابط ليس فيديو. اختر عنصراً من نوع (Movies) في أرشيف الإنترنت." };
+      if (String(meta.mediatype) !== "movies") return { ok: false, reason: "هذا الرابط ليس فيديو." };
       const playable = (data.files || []).some((f) => /\.(mp4|webm|ogv|mkv|m4v|mov|avi|mpg|mpeg)$/i.test(String(f.name || "")) || /MPEG4|h\.264|Ogg Video|WebM|Matroska/i.test(String(f.format || "")));
       if (!playable) return { ok: false, reason: "لا يحتوي هذا العنصر على ملف فيديو قابل للتشغيل." };
       const title = Array.isArray(meta.title) ? meta.title[0] : meta.title;
@@ -2484,8 +2589,7 @@
   function videoBlock(p) {
     const v = safeVideo(p);
     if (!v) return "";
-    const name = v.provider === "youtube" ? "YouTube" : "Internet Archive";
-    return `<figure class="video-card" data-provider="${v.provider}"><div class="video-frame"><button type="button" class="video-play" data-action="play-video" data-provider="${v.provider}" data-vid="${esc(v.id)}" aria-label="${esc(localizeText("تشغيل الفيديو"))}"><img src="${esc(videoThumbUrl(v.provider, v.id))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"><span class="video-badge">${name}</span><span class="video-btn">${PLAY_ICON}</span></button></div><figcaption class="video-meta"><span class="video-src"><i></i>${name}</span><a class="video-open" href="${esc(videoWatchUrl(v.provider, v.id))}" target="_blank" rel="noopener noreferrer nofollow">${esc(localizeText(v.provider === "youtube" ? "المشاهدة على يوتيوب" : "المشاهدة على أرشيف الإنترنت"))} ↗</a></figcaption></figure>`;
+    return `<figure class="video-card" data-provider="${v.provider}"><div class="video-frame"><button type="button" class="video-play" data-action="play-video" data-provider="${v.provider}" data-vid="${esc(v.id)}" aria-label="${esc(localizeText("تشغيل الفيديو"))}"><img src="${esc(videoThumbUrl(v.provider, v.id))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"><span class="video-btn">${PLAY_ICON}</span></button></div></figure>`;
   }
   function playVideo(button) {
     const provider = button.dataset.provider, id = button.dataset.vid;
@@ -2495,6 +2599,8 @@
     const iframe = document.createElement("iframe");
     iframe.src = videoEmbedUrl(provider, id, true);
     iframe.title = localizeText("مشغل الفيديو");
+    iframe.dataset.vid = id; // marks a running player so re-renders keep it alive (see morphInto)
+    iframe.dataset.provider = provider;
     iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture; fullscreen";
     iframe.allowFullscreen = true;
     iframe.referrerPolicy = "strict-origin-when-cross-origin";
@@ -2533,7 +2639,7 @@
     }
     const parsed = parseVideoUrl(raw);
     if (!parsed) {
-      setVideoStatus("error", "الرابط غير مدعوم. استخدم رابط فيديو من يوتيوب أو من archive.org.");
+      setVideoStatus("error", "الرابط غير مدعوم. تأكد من أنه رابط فيديو صحيح من مصدر مدعوم.");
       if (preview) preview.innerHTML = "";
       return null;
     }
@@ -2569,10 +2675,12 @@
   }
   function prefillVideoFields(p) {
     const v = safeVideo(p);
-    const input = document.querySelector("#publishVideo");
-    if (!input || !v) return;
-    input.value = videoWatchUrl(v.provider, v.id);
-    checkVideoInput();
+    if (!v || !document.querySelector("#publishVideo")) return;
+    setVideoValue(v.provider, v.id);
+    setVideoStatus("ok", "✓ الفيديو الحالي في المنشور");
+    const preview = document.querySelector("#videoPreview");
+    if (preview) preview.innerHTML = videoBlock(p);
+    syncMediaExclusivity();
   }
 
   /* A post can hold a video OR code/a file — never both. */
@@ -2583,7 +2691,7 @@
     const hasVideo = !!document.querySelector("#videoId")?.value;
     input.disabled = hasCode;
     const clear = document.querySelector("#videoClear");
-    if (clear) clear.hidden = !input.value.trim() || hasCode;
+    if (clear) clear.hidden = !(input.value.trim() || hasVideo) || hasCode;
     const lock = document.querySelector("#videoLock");
     if (lock) {
       lock.hidden = !hasCode;
@@ -2633,7 +2741,7 @@
     if (apply) {
       const text = ta.value.replace(/\r\n?/g, "\n").replace(/\s+$/g, "");
       const kind = document.querySelector("#publishKind")?.value || "نقاش";
-      const cap = kind === "نقاش" ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES;
+      const cap = maxCodeBytes(kind);
       if (utf8Bytes(text) > cap) {
         toast(language === "en" ? `The code is too large (limit ${fmtBytes(cap)}).` : `الكود كبير جداً (الحد ${fmtBytes(cap)}).`, "error");
         return;
@@ -2666,7 +2774,7 @@
     const codeEl = document.querySelector("#publishCode"), langEl = document.querySelector("#publishLanguage");
     if (!codeEl || !langEl) return;
     const kind = document.querySelector("#publishKind")?.value || "نقاش";
-    const cap = kind === "نقاش" ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES;
+    const cap = maxCodeBytes(kind);
     const article = kind === "مقالة";
     const startText = codeEl.value, startLang = normLang(langEl.value);
     let lang = startLang;
@@ -2821,6 +2929,74 @@
     setTimeout(() => ta.focus(), 30);
   }
 
+
+  /* ---------- Re-render without killing a running video ----------
+     Any DOM replacement reloads an <iframe>, which restarts the video. When a player is running, the page is
+     patched in place (keyed by post) instead of being rebuilt, and the running player is never touched. */
+  const morphKey = (n) => (n.nodeType === 1 ? n.getAttribute("data-post") || n.id || "" : "");
+  function morphAttrs(from, to) {
+    for (const a of Array.from(from.attributes)) if (!to.hasAttribute(a.name)) from.removeAttribute(a.name);
+    for (const a of Array.from(to.attributes)) if (from.getAttribute(a.name) !== a.value) from.setAttribute(a.name, a.value);
+  }
+  function morphNode(oldNode, newNode) {
+    if (oldNode.nodeType !== 1) {
+      if (oldNode.nodeValue !== newNode.nodeValue) oldNode.nodeValue = newNode.nodeValue;
+      return;
+    }
+    if (oldNode.classList.contains("video-card")) {
+      const running = oldNode.querySelector("iframe[data-vid]"), button = newNode.querySelector?.(".video-play");
+      if (running && button && button.dataset.vid === running.dataset.vid) return; // same video: leave the player alone
+    }
+    morphAttrs(oldNode, newNode);
+    morphChildren(oldNode, newNode);
+  }
+  function morphChildren(oldParent, newParent) {
+    const newKids = Array.from(newParent.childNodes);
+    const newKeys = new Set(newKids.map(morphKey).filter(Boolean));
+    for (const n of Array.from(oldParent.childNodes)) {
+      const k = morphKey(n);
+      if (k && !newKeys.has(k)) oldParent.removeChild(n);
+    }
+    const used = new Set();
+    let cursor = oldParent.firstChild;
+    for (const nn of newKids) {
+      while (cursor && used.has(cursor)) cursor = cursor.nextSibling;
+      const k = morphKey(nn);
+      let match = null;
+      if (k) match = Array.from(oldParent.childNodes).find((x) => !used.has(x) && morphKey(x) === k) || null;
+      else {
+        let c = cursor;
+        while (c && (used.has(c) || morphKey(c))) c = c.nextSibling;
+        if (c && c.nodeType === nn.nodeType && c.nodeName === nn.nodeName) match = c;
+      }
+      if (match) {
+        used.add(match);
+        if (match === cursor) cursor = cursor.nextSibling;
+        else {
+          // Moving a node that contains a running player would reload it, so first try to just drop the stale
+          // unkeyed nodes (usually whitespace) that sit in front of the match; move only as a last resort.
+          let c = cursor;
+          while (c && c !== match && !used.has(c) && !morphKey(c)) c = c.nextSibling;
+          if (c === match) {
+            while (cursor !== match) { const next = cursor.nextSibling; oldParent.removeChild(cursor); cursor = next; }
+            cursor = match.nextSibling;
+          } else oldParent.insertBefore(match, cursor);
+        }
+        morphNode(match, nn);
+      } else {
+        const fresh = document.importNode(nn, true);
+        oldParent.insertBefore(fresh, cursor);
+        used.add(fresh);
+      }
+    }
+    for (const n of Array.from(oldParent.childNodes)) if (!used.has(n)) oldParent.removeChild(n);
+  }
+  function morphInto(root, html) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    morphChildren(root, tpl.content);
+  }
+
   /* >>> CODEEX_MEDIA_END */
 
   function codeWindow(code, language = "javascript", filename = "", postId = "") {
@@ -2952,6 +3128,63 @@
     return `${composer()}${toolbar}${items.length ? items.map(postCard).join("") : `<div class="panel empty-state"><b>لا توجد نتائج هنا بعد</b>جرّب اختيار تصنيف آخر أو اكتب أول منشور.</div>`}${feedSentinel()}`;
   }
 
+
+  /* ---------- Group members manager (owner, group admins and the site admin) ---------- */
+  async function openGroupMembers(gid) {
+    const g = groups.find((x) => x.id === gid);
+    if (!g || !canManageGroup(g)) return;
+    try {
+      const [members, admins, kicked] = await Promise.all(
+        ["groupMembers", "groupAdmins", "groupKicked"].map((n) => database.ref(`${n}/${gid}`).once("value").then((x) => x.val() || {})),
+      );
+      const me = activeUser.uid, iAmOwner = g.ownerUid === me, iAmSiteAdmin = isAdminUid(me);
+      const person = (uid) => publicProfiles[uid] || { uid, name: "عضو", handle: "" };
+      const rows = Object.keys(members)
+        .filter((uid) => members[uid] === true)
+        .sort((a, b) => (a === g.ownerUid ? -1 : b === g.ownerUid ? 1 : String(person(a).name).localeCompare(String(person(b).name), "ar")))
+        .map((uid) => {
+          const u = person(uid), isOwnerRow = uid === g.ownerUid, isAdminRow = admins[uid] === true, isSite = isAdminUid(uid);
+          const badges = `${isOwnerRow ? '<span class="gm-badge owner">المالك</span>' : ""}${isAdminRow ? '<span class="gm-badge mod">مشرف</span>' : ""}${isSite ? ADMIN_BADGE : ""}`;
+          const canKick = uid !== me && !isOwnerRow && !isSite && (iAmOwner || iAmSiteAdmin || !isAdminRow);
+          const actions = [
+            iAmOwner && !isOwnerRow && !isSite ? `<button type="button" class="btn small" data-action="${isAdminRow ? "demote-admin" : "promote-admin"}" data-group="${esc(gid)}" data-user="${esc(uid)}">${isAdminRow ? "إزالة الإشراف" : "تعيين مشرفاً"}</button>` : "",
+            canKick ? `<button type="button" class="btn small danger ghost" data-action="kick-member" data-group="${esc(gid)}" data-user="${esc(uid)}">طرد</button>` : "",
+          ].join("");
+          return `<div class="gm-row"><span class="avatar small">${avatarContent(u)}</span><span class="gm-who"><strong>${esc(u.name || "عضو")}${badges}</strong><small>@${esc(u.handle || "member")}</small></span><span class="gm-actions">${actions}</span></div>`;
+        })
+        .join("");
+      const bannedRows = Object.keys(kicked)
+        .filter((uid) => kicked[uid] === true)
+        .map((uid) => `<div class="gm-row"><span class="avatar small">${avatarContent(person(uid))}</span><span class="gm-who"><strong>${esc(person(uid).name || "عضو")}</strong><small>@${esc(person(uid).handle || "member")}</small></span><span class="gm-actions"><button type="button" class="btn small" data-action="unkick-member" data-group="${esc(gid)}" data-user="${esc(uid)}">السماح بالعودة</button></span></div>`)
+        .join("");
+      openModal(`أعضاء ${g.name}`, `<div class="gm-list">${rows || '<p class="muted">لا يوجد أعضاء.</p>'}</div>${bannedRows ? `<h4 class="gm-title">المطرودون</h4><div class="gm-list">${bannedRows}</div>` : ""}<p class="muted gm-note">لا يمكن طرد المالك أو أدمن الموقع.</p>`);
+    } catch (error) {
+      handleError(error);
+    }
+  }
+  async function groupMemberAction(action, gid, uid) {
+    const g = groups.find((x) => x.id === gid);
+    if (!g || !uid || !canManageGroup(g)) return;
+    try {
+      if (action === "promote-admin") await database.ref(`groupAdmins/${gid}/${uid}`).set(true);
+      else if (action === "demote-admin") await database.ref(`groupAdmins/${gid}/${uid}`).remove();
+      else if (action === "kick-member") {
+        if (isAdminUid(uid) || uid === g.ownerUid) return;
+        const name = publicProfiles[uid]?.name || "العضو";
+        if (!window.confirm(language === "en" ? `Remove ${name} from the group?` : `طرد ${name} من المجموعة؟ لن يستطيع الانضمام مجدداً حتى تسمح له.`)) return;
+        await database.ref().update({ [`groupMembers/${gid}/${uid}`]: null, [`groupKicked/${gid}/${uid}`]: true, [`groupAdmins/${gid}/${uid}`]: null });
+        toast("تم طرد العضو من المجموعة");
+      } else if (action === "unkick-member") {
+        await database.ref(`groupKicked/${gid}/${uid}`).remove();
+        toast("يمكن للعضو الانضمام مجدداً");
+      }
+      closeModal();
+      openGroupMembers(gid);
+    } catch (error) {
+      handleError(error);
+    }
+  }
+
   function renderGroups() {
     return `${pageHeader("المجتمع والمجموعات", "عامّة للجميع، أو خاصة بطلب موافقة المشرف.", '<button class="btn primary" data-action="new-group">' + icon("plus") + " إنشاء مجموعة</button>")}${
       groups.length
@@ -2962,10 +3195,10 @@
                 requests = Object.values(groupRequestData[g.id] || {});
               const button = member
                 ? `<button class="btn primary" data-action="group-open" data-id="${esc(g.id)}">دخول المجموعة</button><button class="btn ghost" data-action="leave-group" data-id="${esc(g.id)}">مغادرة</button>`
-                : g.visibility === "private"
+                : needsApproval(g)
                   ? `<button class="btn ${pending ? "soft" : ""}" data-action="join" data-id="${esc(g.id)}" ${pending ? "disabled" : ""}>${pending ? "طلبك قيد المراجعة" : "طلب الانضمام"}</button>`
                   : `<button class="btn" data-action="join" data-id="${esc(g.id)}">انضمام إلى المجموعة</button>`;
-              return `<article class="panel feature-card group-card"><div class="group-card-head"><div class="feature-icon">${icon("groups")}</div><span class="group-visibility ${g.visibility}">${g.visibility === "private" ? icon("lock") + " خاصة" : "عامّة"}</span></div><h3>${esc(g.name)}</h3><p>${esc(g.description || "مجموعة أنشأها عضو في المجتمع.")}</p><div class="metric-row"><span>${icon("user")} ${esc(publicProfiles[g.ownerUid]?.name || "عضو")}</span><span>${g.visibility === "public" ? "تظهر منشوراتها في الرئيسية" : "منشوراتها للأعضاء فقط"}</span></div><div class="group-buttons">${button}</div>${g.ownerUid === activeUser?.uid && g.visibility === "private" ? `<div class="group-requests"><strong>طلبات الانضمام ${requests.length ? `(${requests.length})` : ""}</strong>${requests.length ? requests.map((r) => `<div class="group-request-row"><span>${esc(r.name || "عضو")}</span><div><button class="btn small primary" data-action="approve-group" data-group="${esc(g.id)}" data-user="${esc(r.uid)}">قبول</button> <button class="btn small ghost" data-action="reject-group" data-group="${esc(g.id)}" data-user="${esc(r.uid)}">رفض</button></div></div>`).join("") : '<p class="muted">لا توجد طلبات معلّقة.</p>'}</div>` : ""}</article>`;
+              return `<article class="panel feature-card group-card"><div class="group-card-head"><div class="feature-icon">${icon("groups")}</div><span class="group-visibility ${g.visibility}">${g.visibility === "private" ? icon("lock") + " خاصة" : "عامّة"}</span></div><h3>${esc(g.name)}</h3><p>${esc(g.description || "مجموعة أنشأها عضو في المجتمع.")}</p><div class="metric-row"><span>${icon("user")} ${esc(publicProfiles[g.ownerUid]?.name || "عضو")}</span><span>${g.visibility === "public" ? "تظهر منشوراتها في الرئيسية" : "منشوراتها للأعضاء فقط"}</span></div><div class="group-buttons">${button}${canManageGroup(g) ? `<button class="btn small" data-action="group-members" data-id="${esc(g.id)}">${icon("user")} الأعضاء</button>` : ""}</div>${groupAdminMap[g.id] === true && g.ownerUid !== activeUser?.uid ? '<span class="group-role">أنت مشرف في هذه المجموعة</span>' : ""}${g.ownerUid === activeUser?.uid && g.visibility === "private" ? `<div class="group-requests"><strong>طلبات الانضمام ${requests.length ? `(${requests.length})` : ""}</strong>${requests.length ? requests.map((r) => `<div class="group-request-row"><span>${esc(r.name || "عضو")}</span><div><button class="btn small primary" data-action="approve-group" data-group="${esc(g.id)}" data-user="${esc(r.uid)}">قبول</button> <button class="btn small ghost" data-action="reject-group" data-group="${esc(g.id)}" data-user="${esc(r.uid)}">رفض</button></div></div>`).join("") : '<p class="muted">لا توجد طلبات معلّقة.</p>'}</div>` : ""}</article>`;
             })
             .join("")}</div>`
         : '<div class="panel empty-state"><b>لا توجد مجموعات بعد</b><p>أنشئ مجموعة عامّة أو خاصة. تبقى منشورات المجموعة الخاصة مرئية للأعضاء فقط.</p><button class="btn primary" data-action="new-group">إنشاء أول مجموعة</button></div>'
@@ -2984,10 +3217,10 @@
         : cloudPosts.filter((p) => p.groupId === g.id);
     const intro = member
       ? `<button class="btn primary" data-page="compose" data-group-id="${esc(g.id)}">${icon("plus")} اكتب منشوراً للمجموعة</button>`
-      : g.visibility === "public"
+      : !needsApproval(g)
         ? `<button class="btn primary" data-action="join" data-id="${esc(g.id)}">انضم لرؤية منشورات المجموعة</button>`
         : `<button class="btn primary" data-action="join" data-id="${esc(g.id)}" ${groupPendingStatus[g.id] ? "disabled" : ""}>${groupPendingStatus[g.id] ? "طلبك قيد المراجعة" : "اطلب الانضمام"}</button>`;
-    return `${pageHeader(g.name, `${g.visibility === "private" ? "مجموعة خاصة — المنشورات للأعضاء المقبولين فقط" : "مجموعة عامة — منشوراتها تظهر في الرئيسية"}`, `<button class="btn ghost" data-page="groups">العودة للمجموعات</button>`)}<section class="panel group-detail-intro"><div class="group-card-head"><span class="feature-icon">${icon("groups")}</span><span class="group-visibility ${g.visibility}">${g.visibility === "private" ? "خاصة" : "عامّة"}</span></div><p>${esc(g.description || "")}</p>${intro}</section>${member ? (posts.length ? posts.map(postCard).join("") : '<div class="panel empty-state">لا توجد منشورات في هذه المجموعة بعد.</div>') : `<div class="panel empty-state"><b>${g.visibility === "private" ? "محتوى المجموعة خاص" : "انضم إلى المجموعة"}</b><p>${g.visibility === "private" ? "لا تظهر منشورات المجموعة الخاصة قبل قبول طلبك." : "انضم لعرض المشاركات وكتابتها."}</p>${intro}</div>`}`;
+    return `${pageHeader(g.name, `${g.visibility === "private" ? "مجموعة خاصة — المنشورات للأعضاء المقبولين فقط" : "مجموعة عامة — منشوراتها تظهر في الرئيسية"}`, `${canManageGroup(g) ? `<button class="btn" data-action="group-members" data-id="${esc(g.id)}">${icon("user")} الأعضاء</button>` : ""}<button class="btn ghost" data-page="groups">العودة للمجموعات</button>`)}<section class="panel group-detail-intro"><div class="group-card-head"><span class="feature-icon">${icon("groups")}</span><span class="group-visibility ${g.visibility}">${g.visibility === "private" ? "خاصة" : "عامّة"}</span></div><p>${esc(g.description || "")}</p>${intro}</section>${member ? (posts.length ? posts.map(postCard).join("") : '<div class="panel empty-state">لا توجد منشورات في هذه المجموعة بعد.</div>') : `<div class="panel empty-state"><b>${g.visibility === "private" ? "محتوى المجموعة خاص" : "انضم إلى المجموعة"}</b><p>${g.visibility === "private" ? "لا تظهر منشورات المجموعة الخاصة قبل قبول طلبك." : "انضم لعرض المشاركات وكتابتها."}</p>${intro}</div>`}`;
   }
 
   function renderArticles() {
@@ -3008,19 +3241,59 @@
   function renderNotifications() {
     const notes = Store.notices();
     const empty = language === "en" ? "You have no notifications yet." : "لم تصلك إشعارات بعد.";
-    return `${pageHeader(language === "en" ? "Notifications" : "إشعاراتي", language === "en" ? "New activity and messages from the community." : "تابع التفاعلات والرسائل الجديدة في مجتمعك.", '<button class="btn" data-action="read-all">' + (language === "en" ? "Mark all read" : "تحديد الكل كمقروء") + '</button>')}<section class="panel">${notes.length ? notes.map((n) => `<div class="notice-item" role="button" tabindex="0" data-action="notification-click" data-id="${esc(n.id || "")}" style="${n.read ? "opacity:.68" : ""}"><span class="notice-icon">${icon(n.type === "heart" || n.type === "like" ? "heart" : n.type === "comment" || n.type === "message" ? "comment" : "bell")}</span><div><p>${esc(n.text)}</p><small>${timeAgo(n.time)} ${n.read ? "" : "· جديد"}</small></div></div>`).join("") : `<div class="empty-state">${empty}</div>`}</section>`;
+    return `${pageHeader(language === "en" ? "Notifications" : "إشعاراتي", language === "en" ? "New activity and messages from the community." : "تابع التفاعلات والرسائل الجديدة في مجتمعك.", '<button class="btn" data-action="read-all">' + (language === "en" ? "Mark all read" : "تحديد الكل كمقروء") + '</button>')}<section class="panel">${notes.length ? notes.map((n) => `<div class="notice-item" role="button" tabindex="0" data-action="notification-click" data-id="${esc(n.id || "")}" style="${n.read ? "opacity:.68" : ""}"><span class="notice-icon">${icon(n.type === "heart" || n.type === "like" ? "heart" : n.type === "comment" || n.type === "message" ? "comment" : String(n.type || "").startsWith("follow") ? "user" : "bell")}</span><div><p>${esc(n.text)}</p><small>${timeAgo(n.time)} ${n.read ? "" : "· جديد"}</small></div></div>`).join("") : `<div class="empty-state">${empty}</div>`}</section>`;
   }
+
+  function chatDayLabel(ms) {
+    const d = new Date(ms), now = new Date(), en = language === "en";
+    const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((day(now) - day(d)) / 86400000);
+    if (diff === 0) return en ? "Today" : "اليوم";
+    if (diff === 1) return en ? "Yesterday" : "أمس";
+    return d.toLocaleDateString(en ? "en" : "ar-u-nu-latn", { day: "numeric", month: "long", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" });
+  }
+  const chatClock = (ms) => new Date(ms).toLocaleTimeString(language === "en" ? "en" : "ar-u-nu-latn", { hour: "2-digit", minute: "2-digit" });
 
   function renderMessages() {
     const user = currentUser();
     if (!user)
       return `${pageHeader("الرسائل", "سجّل الدخول للتواصل مع أعضاء المجتمع.", "")}<div class="panel empty-state"><b>المحادثات خاصة بأصحاب الحسابات</b><button class="btn primary" data-auth="login">تسجيل الدخول</button></div>`;
-    const people = Object.values(publicProfiles).filter((p) => p.uid !== user.uid);
-    if (!people.length)
-      return `${pageHeader("الرسائل", "تواصل مع أعضاء مجتمع Codeex.", "")}<div class="panel empty-state"><b>لا يوجد أعضاء مسجلون بعد</b>ستظهر المحادثات هنا بعد انضمام الأعضاء.</div>`;
-    const chat = people.find((x) => x.uid === activeConversation) || people[0];
-    const messages = chat.uid === activeConversation ? activeMessages : [];
-    return `${pageHeader("الرسائل", "محادثات مباشرة بين أعضاء Codeex المسجلين.", "")}<section class="panel messages-layout"><div class="conversation-list">${people.map((c) => `<button class="conversation ${c.uid === chat.uid ? "active" : ""}" data-action="conversation" data-id="${esc(c.uid)}"><span class="avatar small teal">${avatarContent(c)}</span><span><strong>${esc(c.name || "مطور")}${isAdminUid(c.uid) ? ADMIN_BADGE : ""}</strong><small>@${esc(c.handle || "member")}</small></span></button>`).join("")}</div><div class="chat"><div class="chat-head">${profileLink(chat.uid, chat.name || "مطور")} <small class="muted" dir="ltr">@${esc(chat.handle || "member")}</small></div><div class="chat-body" id="chatBody">${messages.map((m) => `<div class="bubble ${m.uid === user.uid ? "own" : ""}">${esc(m.text)}</div>`).join("") || '<div class="muted">ابدأ المحادثة برسالة ترحيب.</div>'}</div><form class="chat-form" id="chatForm" data-to="${esc(chat.uid)}"><input class="field" id="chatInput" maxlength="1000" placeholder="اكتب رسالة..." required><button class="btn primary" type="submit">إرسال</button></form></div></section>`;
+    const people = connectionUids().map((id) => publicProfiles[id]).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"));
+    const chat = people.find((x) => x.uid === activeConversation) || people[0] || null;
+    const requests = Object.entries(incomingFollowReqs || {})
+      .filter(([uid]) => uid !== user.uid)
+      .map(([uid, r]) => ({ uid, ...(publicProfiles[uid] || {}), name: publicProfiles[uid]?.name || r?.name || "عضو" }));
+    const reqHtml = requests.length
+      ? `<div class="msg-requests"><div class="msg-section-title">طلبات المتابعة <span class="msg-count">${requests.length}</span></div>${requests
+          .map(
+            (r) =>
+              `<div class="msg-request"><button type="button" class="msg-req-user" data-action="open-profile" data-uid="${esc(r.uid)}"><span class="avatar small">${avatarContent(r)}</span><span><strong>${esc(r.name)}</strong><small>@${esc(r.handle || "member")}</small></span></button><div class="msg-req-actions"><button type="button" class="btn small primary" data-action="accept-follow" data-uid="${esc(r.uid)}">قبول المتابعة</button><button type="button" class="btn small ghost" data-action="decline-follow" data-uid="${esc(r.uid)}">رفض المتابعة</button></div></div>`,
+          )
+          .join("")}</div>`
+      : "";
+    const list = people.length
+      ? people
+          .map(
+            (c) =>
+              `<button type="button" class="msg-item${chat && c.uid === chat.uid ? " active" : ""}" data-action="conversation" data-id="${esc(c.uid)}" data-search="${esc(`${c.name || ""} ${c.handle || ""}`.toLowerCase())}"><span class="avatar small teal">${avatarContent(c)}</span><span class="msg-item-text"><strong>${esc(c.name || "مطور")}${isAdminUid(c.uid) ? ADMIN_BADGE : ""}</strong><small>@${esc(c.handle || "member")}</small></span></button>`,
+          )
+          .join("")
+      : "";
+    const side = `<aside class="msg-side"><div class="msg-side-head"><h3>المحادثات</h3>${people.length > 4 ? '<input class="field msg-search" id="msgSearch" type="search" placeholder="ابحث في المحادثات…" autocomplete="off">' : ""}</div>${reqHtml}<div class="msg-list">${list || (requests.length ? "" : '<div class="msg-empty-list">لا توجد محادثات بعد</div>')}</div></aside>`;
+    let main;
+    if (!chat) {
+      main = `<section class="msg-chat msg-chat-empty"><div class="msg-empty"><span class="msg-empty-ic">${icon("comment")}</span><b>ابدأ بمتابعة الأعضاء</b><p>تظهر المحادثة هنا بعد أن يقبل العضو طلب متابعتك. افتح ملف أي عضو واضغط «متابعة العضو».</p></div></section>`;
+    } else {
+      const messages = chat.uid === activeConversation ? activeMessages : [];
+      let lastDay = "", rows = "";
+      for (const m of messages) {
+        const label = chatDayLabel(m.createdAt || Date.now());
+        if (label !== lastDay) { rows += `<div class="msg-day"><span>${esc(label)}</span></div>`; lastDay = label; }
+        rows += `<div class="msg-row${m.uid === user.uid ? " own" : ""}"><div class="msg-bubble">${esc(m.text)}<time>${esc(chatClock(m.createdAt || Date.now()))}</time></div></div>`;
+      }
+      main = `<section class="msg-chat"><header class="msg-chat-head"><button type="button" class="msg-back" data-action="chat-back" aria-label="رجوع إلى المحادثات">${icon("arrow")}</button><span class="avatar small blue">${avatarContent(chat)}</span><div class="msg-chat-who"><strong>${profileLink(chat.uid, chat.name || "مطور")}</strong><small dir="ltr">@${esc(chat.handle || "member")}</small></div><button type="button" class="btn small ghost" data-action="open-profile" data-uid="${esc(chat.uid)}">الملف الشخصي</button></header><div class="msg-body" id="chatBody">${rows || '<div class="msg-hello">ابدأ المحادثة برسالة ترحيب 👋</div>'}</div><form class="msg-form" id="chatForm" data-to="${esc(chat.uid)}"><input class="field" id="chatInput" maxlength="1000" placeholder="اكتب رسالة..." autocomplete="off" required><button class="msg-send" type="submit" aria-label="إرسال">${icon("arrow")}</button></form></section>`;
+    }
+    return `${pageHeader("الرسائل", "محادثات مباشرة بين الأعضاء المتابِعين لبعضهم.", "")}<section class="panel msg-shell" data-mobile="${chat && mobileChat ? "chat" : "list"}">${side}${main}</section>`;
   }
 
   function renderSaved() {
@@ -3081,7 +3354,7 @@
         ? posts.map(postCard).join("")
         : `<div class="panel empty-state"><b>لا توجد منشورات بعد</b>${own?.uid === user.uid ? '<button class="btn" data-page="compose">ابدأ أول مشاركة</button>' : ""}</div>`;
     }
-    return `<section class="panel profile-cover"><div class="profile-cover-content"><div class="profile-avatar-wrap"><span class="avatar blue profile-avatar">${avatarContent(user)}</span>${isOwn ? '<label for="profileAvatar" class="avatar-edit" title="تغيير صورة الملف">✎</label><input id="profileAvatar" type="file" accept="image/png,image/jpeg,image/webp" hidden>' : ""}</div><div class="profile-details"><span class="pill${isAdminUid(user.uid) ? " admin-pill" : ""}">${isAdminUid(user.uid) ? "أدمن الموقع" : "مطور في مجتمع Codeex"}</span><h1>${esc(user.name || "مطور")}</h1><div class="profile-handle">@${esc(user.handle || "developer")}</div><p class="profile-bio">${esc(user.bio || "لم يضف نبذة شخصية بعد.")}</p><div class="profile-meta">${joined ? `<span>${icon("calendar")} عضو منذ ${joined}</span>` : ""}</div></div>${isOwn ? `<button class="btn profile-cover-action" data-page="settings">${icon("settings")} تعديل الملف</button>` : `<div class="profile-cover-actions"><button class="btn primary" data-action="message-user" data-uid="${esc(user.uid)}">${icon("comment")} مراسلة</button><button class="btn" data-page="home">العودة</button></div>`}</div></section><section class="panel profile-summary"><div class="profile-stat"><b>${projects.length}</b><span>مشروع</span></div><div class="profile-stat"><b>${mine.length}</b><span>مساهمة</span></div><div class="profile-stat"><b>${articles.length}</b><span>مقالة</span></div></section><div class="profile-tabs"><button class="profile-tab ${profileTab === "projects" ? "active" : ""}" data-action="profile-tab" data-tab="projects">${icon("project")} المشاريع (${projects.length})</button><button class="profile-tab ${profileTab === "posts" ? "active" : ""}" data-action="profile-tab" data-tab="posts">${icon("file")} المنشورات</button><button class="profile-tab ${profileTab === "articles" ? "active" : ""}" data-action="profile-tab" data-tab="articles">${icon("article")} المقالات (${articles.length})</button>${isOwn ? `<button class="profile-tab ${profileTab === "saved" ? "active" : ""}" data-action="profile-tab" data-tab="saved">${icon("bookmark")} المحفوظات (${savedPosts.length})</button>` : ""}</div><div id="profileContent">${content}</div>`;
+    return `<section class="panel profile-cover"><div class="profile-cover-content"><div class="profile-avatar-wrap"><span class="avatar blue profile-avatar">${avatarContent(user)}</span>${isOwn ? '<label for="profileAvatar" class="avatar-edit" title="تغيير صورة الملف">✎</label><input id="profileAvatar" type="file" accept="image/png,image/jpeg,image/webp" hidden>' : ""}</div><div class="profile-details"><span class="pill${isAdminUid(user.uid) ? " admin-pill" : ""}">${isAdminUid(user.uid) ? "أدمن الموقع" : "مطور في مجتمع Codeex"}</span><h1>${esc(user.name || "مطور")}</h1><div class="profile-handle">@${esc(user.handle || "developer")}</div><p class="profile-bio">${esc(user.bio || "لم يضف نبذة شخصية بعد.")}</p><div class="profile-meta">${joined ? `<span>${icon("calendar")} عضو منذ ${joined}</span>` : ""}</div></div>${isOwn ? `<button class="btn profile-cover-action" data-page="settings">${icon("settings")} تعديل الملف</button>` : `${profileFollowActions(user)}`}</div></section><section class="panel profile-summary"><div class="profile-stat"><b>${projects.length}</b><span>مشروع</span></div><div class="profile-stat"><b>${mine.length}</b><span>مساهمة</span></div><div class="profile-stat"><b>${articles.length}</b><span>مقالة</span></div></section><div class="profile-tabs"><button class="profile-tab ${profileTab === "projects" ? "active" : ""}" data-action="profile-tab" data-tab="projects">${icon("project")} المشاريع (${projects.length})</button><button class="profile-tab ${profileTab === "posts" ? "active" : ""}" data-action="profile-tab" data-tab="posts">${icon("file")} المنشورات</button><button class="profile-tab ${profileTab === "articles" ? "active" : ""}" data-action="profile-tab" data-tab="articles">${icon("article")} المقالات (${articles.length})</button>${isOwn ? `<button class="profile-tab ${profileTab === "saved" ? "active" : ""}" data-action="profile-tab" data-tab="saved">${icon("bookmark")} المحفوظات (${savedPosts.length})</button>` : ""}</div><div id="profileContent">${content}</div>`;
   }
 
   function renderSettings() {
@@ -3109,17 +3382,17 @@
     if (editingPostId) kindEl.disabled = true;
     if (label) label.hidden = article;
     if (input) input.disabled = article;
-    const cap = article ? MAX_PROJECT_RESOURCE_BYTES : discussion ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES;
+    const cap = maxCodeBytes(kind);
     if (code) code.maxLength = cap;
     if (hint) hint.textContent = article
       ? (language === "en" ? "Articles: up to 1,000 words; file uploads are disabled." : "المقالة: حتى 1000 كلمة؛ رفع الملفات غير متاح.")
-      : discussion
-        ? (language === "en" ? "Discussion text/code total: up to 300 KB." : "النقاش: مجموع النص والكود حتى 300 كيلوبايت.")
-        : (language === "en" ? `Project/resource code: up to 3 MB; one uploaded file every 7 days; 10 minutes between posts.` : "المشروع/المورد: كود حتى 3 ميجابايت، ملف واحد كل 7 أيام، وفاصل 10 دقائق بين المنشورات.");
+      : !isProjectResourceKind(kind)
+        ? (language === "en" ? "Text and code together: up to 1 MB." : "مجموع النص والكود حتى 1 ميجابايت.")
+        : (language === "en" ? `Project/resource code: up to 2 MB; one uploaded file every 7 days; 10 minutes between posts.` : "المشروع/المورد: كود حتى 2 ميجابايت، ملف واحد كل 7 أيام، وفاصل 10 دقائق بين المنشورات.");
     if (hint && isAdminUid(activeUser?.uid))
       hint.textContent += language === "en" ? " As the site admin you have no limit on how many posts you publish or when." : " بصفتك أدمن الموقع: لا توجد حدود على عدد منشوراتك أو على توقيت النشر.";
     if (article && selectedCodeFileBase64) clearSelectedCodeFile(true);
-    else if (selectedCodeFileBytes > 0 && selectedCodeFileBytes > (discussion ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES)) clearSelectedCodeFile(true);
+    else if (selectedCodeFileBytes > 0 && selectedCodeFileBytes > cap) clearSelectedCodeFile(true);
     syncMediaExclusivity();
   }
 
@@ -3143,7 +3416,7 @@
       return `${pageHeader("المشاركة في Codeex", "سجّل الدخول أولاً لتتمكن من النشر.", "")}<div class="panel empty-state"><b>تحتاج إلى حساب للمشاركة</b><button class="btn primary" data-auth="register">إنشاء حساب</button></div>`;
     return `${pageHeader("إنشاء مشاركة", "شارك فكرة أو مقالة أو مشروعاً مع المطورين العرب.", "")}<section class="panel"><form class="form-grid" id="publishForm"><label>نوع المشاركة<select class="field" id="publishKind"><option>نقاش</option><option>مقالة</option><option>مورد</option><option>مشروع</option></select></label><label>مكان النشر<select class="field" id="publishGroup"><option value="">المجتمع العام — يظهر المنشور في الرئيسية</option>${groups
       .filter((g) => g.visibility === "public" || isGroupMember(g))
-      .map((g) => `<option value="${esc(g.id)}">${esc(g.name)} — ${g.visibility === "private" ? "خاص" : "عام"}</option>`).join("")}</select></label><label>ظهور المنشور<select class="field" id="publishVisibility" aria-describedby="publishVisibilityHint"><option value="members">أعضاء Codeex فقط</option><option value="public">عام (سيظهر في كل محركات البحث ولا يتطلب تسجيل دخول)</option></select><small class="muted" id="publishVisibilityHint">خاص بأعضاء Codeex المسجلين؛ لا يظهر في صفحات المشاركة العامة أو محركات البحث.</small></label><label>العنوان (اختياري للنقاش)<input class="field" id="publishTitle" maxlength="140" placeholder="عنوان واضح ومفيد"></label><label>التفاصيل<textarea class="field" id="publishText" maxlength="307200" placeholder="اكتب ما تريد مشاركته..." required></textarea></label><div class="video-attach" id="videoAttach"><strong class="attach-title">فيديو (اختياري)</strong><div class="video-input-row"><input class="field" id="publishVideo" type="text" inputmode="url" dir="ltr" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://www.youtube.com/watch?v=… | https://archive.org/details/…"><button type="button" class="btn small ghost" id="videoClear" data-action="clear-video" hidden>إزالة الفيديو</button></div><div class="video-status" id="videoStatus" role="status" aria-live="polite"></div><div id="videoPreview"></div><small class="field-hint" id="videoLock" hidden></small><small class="field-hint">يُدعم يوتيوب وأرشيف الإنترنت (archive.org). نتحقق من أن الفيديو يعمل قبل النشر، وإذا أضفت فيديو فلا يمكن إرفاق كود أو ملف معه.</small><input type="hidden" id="videoProvider"><input type="hidden" id="videoId"></div><div class="code-attach" id="codeAttach"><strong class="attach-title">مقطع كود (اختياري)</strong><div id="codeAttachBody"></div><input id="codeFile" type="file" accept=".js,.jsx,.ts,.tsx,.py,.html,.css,.json,.java,.php,.go,.rs,.c,.cpp,.cs,.sql,.sh,.txt" hidden><textarea id="publishCode" hidden maxlength="3145728"></textarea><input id="publishLanguage" type="hidden" value="javascript"><input id="codeFilename" type="hidden"><small class="muted" id="publishPolicyHint"></small></div><label>وسوم مفصولة بفاصلة<input class="field" id="publishTags" placeholder="React, JavaScript"></label><div class="modal-actions"><button class="btn" type="button" data-page="home">إلغاء</button><button class="btn primary" type="submit">نشر المشاركة</button></div></form></section>`;
+      .map((g) => `<option value="${esc(g.id)}">${esc(g.name)} — ${g.visibility === "private" ? "خاص" : "عام"}</option>`).join("")}</select></label><label>ظهور المنشور<select class="field" id="publishVisibility" aria-describedby="publishVisibilityHint"><option value="members">أعضاء Codeex فقط</option><option value="public">عام (سيظهر في كل محركات البحث ولا يتطلب تسجيل دخول)</option></select><small class="muted" id="publishVisibilityHint">خاص بأعضاء Codeex المسجلين؛ لا يظهر في صفحات المشاركة العامة أو محركات البحث.</small></label><label>العنوان (اختياري للنقاش)<input class="field" id="publishTitle" maxlength="140" placeholder="عنوان واضح ومفيد"></label><label>التفاصيل<textarea class="field" id="publishText" maxlength="307200" placeholder="اكتب ما تريد مشاركته..." required></textarea></label><div class="video-attach" id="videoAttach"><strong class="attach-title">فيديو (اختياري)</strong><div class="video-input-row"><input class="field" id="publishVideo" type="text" inputmode="url" dir="ltr" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ألصق رابط الفيديو هنا"><button type="button" class="btn small ghost" id="videoClear" data-action="clear-video" hidden>إزالة الفيديو</button></div><div class="video-status" id="videoStatus" role="status" aria-live="polite"></div><div id="videoPreview"></div><small class="field-hint" id="videoLock" hidden></small><small class="field-hint">نتحقق من أن الفيديو يعمل قبل النشر، وإذا أضفت فيديو فلا يمكن إرفاق كود أو ملف معه.</small><input type="hidden" id="videoProvider"><input type="hidden" id="videoId"></div><div class="code-attach" id="codeAttach"><strong class="attach-title">مقطع كود (اختياري)</strong><div id="codeAttachBody"></div><input id="codeFile" type="file" accept=".js,.jsx,.ts,.tsx,.py,.html,.css,.json,.java,.php,.go,.rs,.c,.cpp,.cs,.sql,.sh,.txt" hidden><textarea id="publishCode" hidden maxlength="2097152"></textarea><input id="publishLanguage" type="hidden" value="javascript"><input id="codeFilename" type="hidden"><small class="muted" id="publishPolicyHint"></small></div><label>وسوم مفصولة بفاصلة<input class="field" id="publishTags" placeholder="React, JavaScript"></label><div class="modal-actions"><button class="btn" type="button" data-page="home">إلغاء</button><button class="btn primary" type="submit">نشر المشاركة</button></div></form></section>`;
   }
 
   const searchHit = (text) => !!searchTerm && String(text || "").toLowerCase().includes(searchTerm.toLowerCase());
@@ -3209,7 +3482,15 @@
     else if (page === "compose") html = renderCompose();
     else if (page === "search") html = renderSearch();
     else html = feed();
-    view.innerHTML = localizeMarkup(html);
+    const markup = localizeMarkup(html);
+    const samePage = lastRenderedPage === page;
+    lastRenderedPage = page;
+    if (samePage && view.querySelector(".video-card iframe[data-vid]")) morphInto(view, markup);
+    else view.innerHTML = markup;
+    if (page === "messages") {
+      const body = document.querySelector("#chatBody");
+      if (body) body.scrollTop = body.scrollHeight;
+    }
     setupFeedObserver();
     if (page === "compose") updateComposePolicyUI();
   }
@@ -3421,6 +3702,11 @@
         toast("تعذّر فتح المحادثة مع هذا العضو.");
         return;
       }
+      if (!canMessage(uid)) {
+        toast("تظهر المراسلة بعد أن يقبل العضو طلب متابعتك.");
+        return;
+      }
+      mobileChat = true;
       closeModal();
       subscribeConversation(uid);
       navigate("messages");
@@ -3450,7 +3736,7 @@
       if (!requireUser()) return;
       const g = groups.find((x) => x.id === act.dataset.id);
       if (!g) return;
-      if (g.visibility === "private") {
+      if (needsApproval(g)) {
         if (isGroupMember(g) || groupPendingStatus[g.id]) return;
         database
           .ref(`groupRequests/${g.id}/${activeUser.uid}`)
@@ -3464,8 +3750,12 @@
         return;
       }
       database
-        .ref(`groupMembers/${g.id}/${activeUser.uid}`)
-        .set(true)
+        .ref(`groupKicked/${g.id}/${activeUser.uid}`)
+        .once("value")
+        .then((kicked) => {
+          if (kicked.val() === true) throw new AppError("تم إبعادك من هذه المجموعة ولا يمكنك الانضمام إليها مجدداً.");
+          return database.ref(`groupMembers/${g.id}/${activeUser.uid}`).set(true);
+        })
         .then(() => {
           groupMembershipOverrides[g.id] = true;
           groupMembersMap[g.id] = groupMembersMap[g.id] || {};
@@ -3526,6 +3816,11 @@
           .remove()
           .then(() => toast("رُفض الطلب"))
           .catch(handleError);
+      return;
+    }
+    if (action === "group-members") { openGroupMembers(act.dataset.id); return; }
+    if (["promote-admin", "demote-admin", "kick-member", "unkick-member"].includes(action)) {
+      groupMemberAction(action, act.dataset.group, act.dataset.user);
       return;
     }
     if (action === "group-open") {
@@ -3717,8 +4012,16 @@
       if (!note) return;
       if (!note.read) database.ref(`users/${activeUser.uid}/notifications/${note.id}`).update({ read: true, readAt: Date.now() }).catch(handleError);
       if (note.type === "message" && note.actorUid && publicProfiles[note.actorUid]) {
+        mobileChat = true;
         subscribeConversation(note.actorUid);
         navigate("messages");
+      } else if (note.type === "follow_request") {
+        mobileChat = false;
+        navigate("messages");
+      } else if (note.type === "follow_accepted" && note.actorUid && publicProfiles[note.actorUid]) {
+        viewedProfileUid = note.actorUid;
+        profileTab = "projects";
+        navigate("profile");
       }
       return;
     }
@@ -3730,7 +4033,19 @@
       return;
     }
     if (action === "conversation") {
+      mobileChat = true;
       subscribeConversation(act.dataset.id);
+      renderPage();
+      return;
+    }
+    if (action === "chat-back") {
+      mobileChat = false;
+      renderPage();
+      return;
+    }
+    if (["follow", "cancel-follow", "unfollow", "accept-follow", "decline-follow", "remove-follower"].includes(action)) {
+      if (!requireUser()) return;
+      followAction(action, act.dataset.uid);
       return;
     }
     if (action === "resource") {
@@ -3827,8 +4142,8 @@
         codeLanguage: document.querySelector("#publishLanguage").value,
         fileName: document.querySelector("#codeFilename").value.trim(),
         fileSize: selectedCodeFileBytes,
-        videoProvider: "",
-        videoId: "",
+        videoProvider: document.querySelector("#videoProvider")?.value || "",
+        videoId: document.querySelector("#videoId")?.value || "",
         tags: document
           .querySelector("#publishTags")
           .value.split(/[,،]/)
@@ -3849,6 +4164,13 @@
           if (!checked) throw new AppError(videoLastReason || "تحقق من رابط الفيديو قبل النشر.");
           draft.videoProvider = checked.provider;
           draft.videoId = checked.id;
+          draft.code = "";
+          draft.fileName = "";
+          draft.fileSize = 0;
+        } else if (draft.videoId) {
+          // Editing a post that already has a video: check that it still works.
+          const res = await verifyVideo(draft.videoProvider, draft.videoId);
+          if (!res.ok) throw new AppError(res.reason);
           draft.code = "";
           draft.fileName = "";
           draft.fileSize = 0;
@@ -3937,6 +4259,10 @@
       e.preventDefault();
       const field = document.querySelector("#chatInput"), text = field.value.trim(), other = e.target.dataset.to;
       if (!requireUser() || !text || !other) return;
+      if (!canMessage(other)) {
+        toast("تظهر المراسلة بعد أن يقبل العضو طلب متابعتك.");
+        return;
+      }
       if (text.length > 1000) {
         handleError(new AppError("الرسالة طويلة؛ الحد الأقصى 1000 حرف."));
         return;
@@ -4004,6 +4330,11 @@
   });
 
   document.querySelector("#pageView").addEventListener("input", (e) => {
+    if (e.target.id === "msgSearch") {
+      const q = e.target.value.trim().toLowerCase();
+      document.querySelectorAll(".msg-item").forEach((el) => { el.hidden = !!q && !String(el.dataset.search || "").includes(q); });
+      return;
+    }
     if (e.target.id === "publishVideo") { scheduleVideoCheck(); return; }
     if (e.target.id !== "publishCode" || !selectedCodeFileBase64) return;
     if (e.target.value !== selectedCodeFileText) {
@@ -4032,16 +4363,16 @@
     const file = input.files[0];
     if (input.id === "codeFile") {
       const kind = document.querySelector("#publishKind")?.value || "نقاش";
-      const maxBytes = kind === "مقالة" ? 0 : kind === "نقاش" ? MAX_DISCUSSION_BYTES : MAX_PROJECT_RESOURCE_BYTES;
+      const maxBytes = kind === "مقالة" ? 0 : maxCodeBytes(kind);
       if (kind === "مقالة") {
         toast(language === "en" ? "Articles cannot include an uploaded file." : "لا يمكن إرفاق ملف بالمقالة.");
         input.value = "";
         return;
       }
       if (file.size > maxBytes) {
-        toast(kind === "نقاش"
-          ? (language === "en" ? "A discussion file cannot exceed 300 KB." : "لا يمكن أن يتجاوز ملف النقاش 300 كيلوبايت.")
-          : (language === "en" ? "Project/resource files cannot exceed 3 MB." : "لا يمكن أن يتجاوز ملف المشروع أو المورد 3 ميجابايت."));
+        toast(!isProjectResourceKind(kind)
+          ? (language === "en" ? "This kind of post cannot include a file larger than 1 MB." : "لا يمكن أن يتجاوز الملف 1 ميجابايت لهذا النوع من المنشورات.")
+          : (language === "en" ? "Project/resource files cannot exceed 2 MB." : "لا يمكن أن يتجاوز ملف المشروع أو المورد 2 ميجابايت."));
         input.value = "";
         return;
       }
@@ -4355,27 +4686,19 @@
     "تسجيل الدخول إلى Codeex": "Sign in to Codeex",
     "إنشاء حساب في Codeex": "Create your Codeex account",
     "فيديو (اختياري)": "Video (optional)",
-    "يُدعم يوتيوب وأرشيف الإنترنت (archive.org). نتحقق من أن الفيديو يعمل قبل النشر، وإذا أضفت فيديو فلا يمكن إرفاق كود أو ملف معه.": "YouTube and Internet Archive (archive.org) are supported. We check that the video works before publishing; a post with a video cannot include code or a file.",
     "أزل الكود أو الملف أولاً لتتمكن من إضافة فيديو.": "Remove the code or file first to add a video.",
-    "الرابط غير مدعوم. استخدم رابط فيديو من يوتيوب أو من archive.org.": "Unsupported link. Use a YouTube or archive.org video link.",
     "جارٍ التحقق من أن الفيديو يعمل…": "Checking that the video works…",
     "جارٍ التحقق من الفيديو…": "Checking the video…",
     "تحقق من رابط الفيديو قبل النشر.": "Check the video link before publishing.",
     "رابط الفيديو غير صالح.": "The video link is not valid.",
-    "صاحب الفيديو لا يسمح بتضمينه خارج يوتيوب.": "The video owner does not allow embedding outside YouTube.",
     "الفيديو غير موجود، أو هو خاص أو محذوف.": "The video does not exist, or it is private or deleted.",
     "تعذر التحقق من الفيديو الآن. حاول مرة أخرى.": "Could not check the video right now. Try again.",
     "تعذر الوصول إلى الفيديو؛ تأكد من الرابط ومن اتصالك بالإنترنت.": "Could not reach the video; check the link and your connection.",
-    "تعذر الوصول إلى أرشيف الإنترنت الآن. حاول مرة أخرى.": "Could not reach the Internet Archive right now. Try again.",
-    "هذا العنصر غير موجود في أرشيف الإنترنت.": "This item does not exist on the Internet Archive.",
     "هذا العنصر مقيّد أو غير متاح للعرض.": "This item is restricted or unavailable for viewing.",
-    "هذا الرابط ليس فيديو. اختر عنصراً من نوع (Movies) في أرشيف الإنترنت.": "This link is not a video. Choose a Movies item on the Internet Archive.",
     "لا يحتوي هذا العنصر على ملف فيديو قابل للتشغيل.": "This item has no playable video file.",
     "تعذر التحقق من الفيديو؛ تأكد من اتصالك بالإنترنت ثم أعد المحاولة.": "Could not check the video; check your connection and try again.",
     "تشغيل الفيديو": "Play video",
     "مشغل الفيديو": "Video player",
-    "المشاهدة على يوتيوب": "Watch on YouTube",
-    "المشاهدة على أرشيف الإنترنت": "Watch on the Internet Archive",
     "تمت إضافة فيديو، لذلك لا يمكن إرفاق كود أو ملف. أزل الفيديو إن أردت إضافة كود.": "A video was added, so code or files cannot be attached. Remove the video to add code.",
     "تمت إضافة فيديو؛ أزله أولاً لتتمكن من إضافة كود.": "A video was added; remove it first to add code.",
     "تعديل في المحرر": "Edit in editor",
@@ -4401,6 +4724,48 @@
     "مجموعاتك المطابقة": "Matching groups you joined",
     "المنشورات المطابقة": "Matching posts",
     "المنشورات والمجموعات المطابقة، بما فيها مجموعاتك العامة والخاصة.": "Matching posts and groups, including your public and private groups.",
+    "نتحقق من أن الفيديو يعمل قبل النشر، وإذا أضفت فيديو فلا يمكن إرفاق كود أو ملف معه.": "We check that the video works before publishing; a post with a video cannot include code or a file.",
+    "الرابط غير مدعوم. تأكد من أنه رابط فيديو صحيح من مصدر مدعوم.": "Unsupported link. Make sure it is a valid video link from a supported source.",
+    "صاحب الفيديو لا يسمح بتضمينه في المواقع الأخرى.": "The video owner does not allow embedding it on other sites.",
+    "تعذر الوصول إلى مصدر الفيديو الآن. حاول مرة أخرى.": "Could not reach the video source right now. Try again.",
+    "هذا الفيديو غير موجود.": "This video does not exist.",
+    "هذا الرابط ليس فيديو.": "This link is not a video.",
+    "ألصق رابط الفيديو هنا": "Paste the video link here",
+    "✓ الفيديو الحالي في المنشور": "✓ The post's current video",
+    "طلبات المتابعة": "Follow requests",
+    "قبول المتابعة": "Accept",
+    "رفض المتابعة": "Decline",
+    "المحادثات": "Conversations",
+    "ابحث في المحادثات…": "Search conversations…",
+    "ابدأ بمتابعة الأعضاء": "Start by following members",
+    "تظهر المحادثة هنا بعد أن يقبل العضو طلب متابعتك. افتح ملف أي عضو واضغط «متابعة العضو».": "The conversation appears here once the member accepts your follow request. Open any member's profile and press “Follow”.",
+    "ابدأ المحادثة برسالة ترحيب 👋": "Start the conversation with a hello 👋",
+    "رجوع إلى المحادثات": "Back to conversations",
+    "الملف الشخصي": "Profile",
+    "محادثات مباشرة بين الأعضاء المتابِعين لبعضهم.": "Direct conversations between members who follow each other.",
+    "متابعة العضو": "Follow",
+    "✓ تتابع هذا العضو": "✓ Following",
+    "طلب المتابعة قيد الانتظار · إلغاء": "Request pending · Cancel",
+    "قبول طلب المتابعة": "Accept follow request",
+    "رفض طلب المتابعة": "Decline follow request",
+    "أُرسل طلب المتابعة. ستظهر المراسلة عند قبوله.": "Follow request sent. Messaging appears once it is accepted.",
+    "رُفض طلب المتابعة": "Follow request declined",
+    "أُلغي طلب المتابعة": "Follow request cancelled",
+    "قبلت طلب المتابعة. يمكنكما الآن المراسلة.": "Request accepted. You can now message each other.",
+    "ألغيت متابعة هذا العضو": "You unfollowed this member",
+    "أُزيل المتابع": "Follower removed",
+    "تظهر المراسلة بعد أن يقبل العضو طلب متابعتك.": "Messaging is available after the member accepts your follow request.",
+    "لا توجد محادثات بعد": "No conversations yet",
+    "أنت مشرف في هذه المجموعة": "You are a moderator of this group",
+    "تم إبعادك من هذه المجموعة ولا يمكنك الانضمام إليها مجدداً.": "You were removed from this group and cannot join it again.",
+    "إزالة الإشراف": "Remove moderator",
+    "تعيين مشرفاً": "Make moderator",
+    "المطرودون": "Removed members",
+    "السماح بالعودة": "Allow to rejoin",
+    "لا يمكن طرد المالك أو أدمن الموقع.": "The owner and the site admin cannot be removed.",
+    "تم طرد العضو من المجموعة": "Member removed from the group",
+    "يمكن للعضو الانضمام مجدداً": "The member can join again",
+    "لا يوجد أعضاء.": "No members.",
   };
 
   Object.assign(EN, {
